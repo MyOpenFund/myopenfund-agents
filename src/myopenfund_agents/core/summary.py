@@ -4,6 +4,7 @@ Every input-derived string placed into the text goes through `_clean`, which rep
 so no value can close the `<summary>` delimiter (Review Focus 2).
 """
 
+import math
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -90,7 +91,8 @@ def _history_index(night_start: datetime, finished_at: datetime) -> int:
 
 
 def _days_late(rows: list[CadenceRow]) -> int | None:
-    values = [r.days_late for r in rows if r.days_late is not None]
+    # Non-finite values (nan, inf) carry no usable lateness and are ignored.
+    values = [r.days_late for r in rows if r.days_late is not None and math.isfinite(r.days_late)]
     return int(max(values)) if values else None
 
 
@@ -157,7 +159,7 @@ def _source_state(
     return state
 
 
-def _block(state: SourceState) -> str:
+def _block(state: SourceState, max_chars: int) -> str:
     lines = [
         f"[{_clean(state.source_code)}] corpus={_clean(state.corpus or '-')} flags={','.join(state.flags)}",
         f"  tonight: seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
@@ -168,7 +170,7 @@ def _block(state: SourceState) -> str:
         f"  days_late={_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
     ]
     if state.failed_commands:
-        lines.append("  failed_commands: " + "; ".join(_clean(c) for c in state.failed_commands))
+        lines.append("  failed_commands: " + "; ".join(_cut(_clean(c), max_chars) for c in state.failed_commands))
     lines += [f"  sample: {s}" for s in state.error_samples]
     return "\n".join(lines) + "\n"
 
@@ -177,9 +179,9 @@ def _failing_label(run: RunRow, has_detail: bool) -> str:
     return _clean(run.run_id) if has_detail else _clean(run.run_id) + NO_DETAIL_SUFFIX
 
 
-def _run_line(run: RunRow, has_detail: bool) -> str:
+def _run_line(run: RunRow, has_detail: bool, max_chars: int) -> str:
     return (
-        f"{_failing_label(run, has_detail)}: {_clean(run.tool)} {_clean(run.command)} "
+        f"{_failing_label(run, has_detail)}: {_cut(_clean(run.tool), max_chars)} {_cut(_clean(run.command), max_chars)} "
         f"outcome={_clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
     )
 
@@ -194,7 +196,8 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
 
     history: dict[str, dict[int, list[SourceRunRow]]] = defaultdict(lambda: defaultdict(list))
     for row in inputs.history:
-        if row.finished_at is None:
+        # Unfinished rows, and rows finished at or after night_start (tonight's own rows), are not history.
+        if row.finished_at is None or row.finished_at >= inputs.night_start:
             continue
         index = _history_index(inputs.night_start, row.finished_at)
         if 1 <= index <= settings.volume_window_nights:
@@ -251,20 +254,30 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     unfinished = (len(inputs.runs) - len(runs)) + (len(inputs.source_runs) - len(tonight_rows))
     if unfinished:
         header.append(f"Unfinished rows ignored: {unfinished}")
-    if failing:
-        header.append("Failing runs:")
-        header += [f"- {_run_line(r, r.run_id in run_ids_with_detail)}" for r in failing]
-    header.append(f"Sources: {normal_count} normal, {len(unusual)} unusual")
+    tail = [f"Sources: {normal_count} normal, {len(unusual)} unusual"]
     if inputs.cadence is None:
-        header.append(CADENCE_UNKNOWN_LINE)
+        tail.append(CADENCE_UNKNOWN_LINE)
     unattached = sum(1 for e in inputs.discovery_errors if e.source_code is None)
     if unattached:
-        header.append(f"Open discovery errors without a source: {unattached}")
+        tail.append(f"Open discovery errors without a source: {unattached}")
+    if failing:
+        header.append("Failing runs:")
+        # Failing runs are listed while the header stays within budget, keeping room for the tail lines.
+        more_room = len(f"... and {len(failing)} more failing runs\n")
+        used = sum(len(line) + 1 for line in header + tail) + more_room
+        for listed, run in enumerate(failing):
+            line = f"- {_run_line(run, run.run_id in run_ids_with_detail, settings.error_sample_max_chars)}"
+            if used + len(line) + 1 > settings.summary_char_budget:
+                header.append(f"... and {len(failing) - listed} more failing runs")
+                break
+            header.append(line)
+            used += len(line) + 1
+    header += tail
 
     text = "\n".join(header) + "\n"
     omitted: list[str] = []
     for state in unusual_states:
-        block = "\n" + _block(state)
+        block = "\n" + _block(state, settings.error_sample_max_chars)
         # Most important blocks first; once one overflows, it and every later block are omitted.
         if omitted or len(text) + len(block) > settings.summary_char_budget:
             omitted.append(_clean(state.source_code))

@@ -204,3 +204,52 @@ def test_null_counters_and_unfinished_rows(green_history):
     assert state.history_nights == 14
     assert state.docs_seen == 3
     assert state.docs_new == 0 and state.docs_failed == 0 and state.fetch_errors == 0
+
+
+def test_tonight_row_duplicated_in_history_is_not_history(green_history):
+    failed_tonight = src_run("se", seen=10, outcome="failed", exit_code=1)
+    base = build_summary(night([*_tonight()[:2], failed_tonight], green_history), SETTINGS)
+    dup = build_summary(night([*_tonight()[:2], failed_tonight], [*green_history, failed_tonight]), SETTINGS)
+    assert dup.unusual["se"].consecutive_failed_nights == 0
+    assert dup.unusual["se"].history_nights == base.unusual["se"].history_nights == 14
+    assert dup.unusual["se"].median_docs_seen == 10
+
+
+def test_non_finite_days_late_is_ignored(green_history):
+    cadence = [
+        CadenceRow(source_code="jp", days_late=float("nan")),
+        CadenceRow(source_code="jp", days_late=float("inf")),
+        CadenceRow(source_code="ch", days_late=float("-inf")),
+        CadenceRow(source_code="ch", days_late=2.0),
+    ]
+    summary = build_summary(night(_tonight(), green_history, cadence=cadence), SETTINGS)
+    assert list(summary.unusual) == ["ch"]
+    assert summary.unusual["ch"].days_late == 2
+
+
+def test_failing_runs_bounded_by_budget():
+    runs = [
+        RunRow(
+            run_id=f"run-{i:03d}",
+            tool="harvester",
+            command="harvest " + "y" * 400,
+            finished_at=END - timedelta(hours=1),
+            outcome="failed",
+            exit_code=1,
+        )
+        for i in range(100)
+    ]
+    settings = A1Settings(summary_char_budget=2000)
+    summary = build_summary(night(runs=runs), settings)
+    assert len(summary.failing_runs) == 100
+    assert len(summary.text) < 2000 + 300
+    assert any(line.startswith("... and ") and line.endswith(" more failing runs") for line in summary.text.splitlines())
+    assert "y" * 300 not in summary.text
+    assert "Sources: 0 normal, 0 unusual" in summary.text
+
+
+def test_failed_commands_cut_in_blocks():
+    row = src_run("fr", outcome="failed", command="harvest " + "z" * 500)
+    summary = build_summary(night([row]), SETTINGS)
+    assert "z" * 300 not in summary.text
+    assert "…" in summary.text
