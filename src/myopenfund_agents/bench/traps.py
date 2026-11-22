@@ -4,7 +4,7 @@ from myopenfund_agents.bench.fixtures import Expected, ExpectedAction, Key, Meta
 from myopenfund_agents.core.actions import fingerprint
 from myopenfund_agents.core.findings import Category, Finding, Severity
 from myopenfund_agents.core.inputs import NightInputs, OpenIssue, SourceRunRow
-from myopenfund_agents.core.summary import build_summary
+from myopenfund_agents.core.summary import NO_RUN_LINE, build_summary
 from myopenfund_agents.settings import A1Settings
 
 GENERAL_OUTAGE_ERROR = "getaddrinfo failed: Name or service not known"
@@ -143,4 +143,24 @@ def known_problem(base: NightInputs, code: str, repo: str, issue_number: int = 1
     return _make(
         base, inputs, f"known-problem-{code}", f"Source {code} has unreadable documents and an open issue already",
         [(code, Category.UNREADABLE_PDF)], "comment",
+    )  # fmt: skip
+
+
+def no_run(base: NightInputs, settings: A1Settings | None = None) -> Night:
+    """The scheduler did not fire: no run and no source run tonight, history unchanged."""
+    settings = settings or A1Settings()
+    if any(i.fingerprint.endswith(":*:unknown") for i in base.open_issues):
+        raise ValueError("an open issue already has a ('*', unknown) fingerprint: the expected action would differ")
+    inputs = base.model_copy(deep=True)
+    inputs.runs = []
+    inputs.source_runs = []
+    summary = build_summary(inputs, settings)
+    if NO_RUN_LINE not in summary.text or summary.unusual:
+        raise ValueError(
+            f"night {base.night_id} still shows unusual sources without any run (discovery errors or cadence)"
+        )
+    notes = ["An addition to the spec's trap list (Review Focus 4), pending Marc's approval."]
+    return _make(
+        base, inputs, "no-run", "No run and no source run finished tonight: the scheduler did not fire",
+        [("*", Category.UNKNOWN)], "new_issue", notes,
     )  # fmt: skip

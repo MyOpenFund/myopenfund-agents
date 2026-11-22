@@ -4,8 +4,8 @@ from pydantic import ValidationError
 from conftest import night, src_run
 from myopenfund_agents.bench import traps
 from myopenfund_agents.bench.fixtures import Expected, ExpectedAction, Key, Meta, Night, load, load_all, save
-from myopenfund_agents.core.inputs import OpenIssue, RunRow
-from myopenfund_agents.core.summary import build_summary
+from myopenfund_agents.core.inputs import DiscoveryError, OpenIssue, RunRow
+from myopenfund_agents.core.summary import NO_RUN_LINE, build_summary
 from myopenfund_agents.settings import A1Settings
 
 
@@ -149,3 +149,33 @@ def test_trap_roundtrip_and_load_all(tmp_path, green_history):
     (tmp_path / "empty-dir").mkdir()
     assert load(tmp_path / t1.inputs.night_id) == t1
     assert [n.inputs.night_id for n in load_all(tmp_path)] == sorted([t1.inputs.night_id, t2.inputs.night_id])
+
+
+def test_no_run_trap(green_history):
+    base = _base(green_history)
+    base.runs.append(RunRow(run_id="run-1", tool="harvester", command="harvest", outcome="ok", exit_code=0,
+                            finished_at=base.night_end))  # fmt: skip
+    before = base.model_copy(deep=True)
+    t = traps.no_run(base)
+    assert t.inputs.night_id == f"{base.night_id}--no-run"
+    assert t.inputs.runs == [] and t.inputs.source_runs == []
+    assert t.inputs.history == base.history
+    summary = _summary(t.inputs)
+    assert NO_RUN_LINE in summary.text
+    assert summary.unusual == {}
+    assert t.expected.keys() == {("*", "unknown")}
+    assert [(a.kind, a.source_code, a.category) for a in t.expected.actions] == [("new_issue", "*", "unknown")]
+    assert any("addition to the spec's trap list" in note for note in t.meta.notes)
+    assert base == before
+
+
+def test_no_run_trap_guards_its_ground_truth(green_history):
+    base = _base(green_history)
+    with_issue = base.model_copy(deep=True)
+    with_issue.open_issues.append(OpenIssue(fingerprint="a1:data-orchestrator:*:unknown", number=3, repo="r"))
+    with pytest.raises(ValueError, match="open issue"):
+        traps.no_run(with_issue)
+    with_errors = base.model_copy(deep=True)
+    with_errors.discovery_errors.append(DiscoveryError(fingerprint="f1", source_code="us"))
+    with pytest.raises(ValueError, match="unusual"):
+        traps.no_run(with_errors)

@@ -150,6 +150,16 @@ def test_instructions_cover_brief_points():
     assert "two to four sentences" in lowered
 
 
+def test_instructions_no_run_rule():
+    from myopenfund_agents.core.summary import NO_RUN_LINE
+
+    text = A1_INSTRUCTIONS
+    rule = next(line for line in text.splitlines() if NO_RUN_LINE in line)
+    assert 'exactly one finding ("*", unknown)' in rule and "severity error" in rule
+    rule2 = next(line for line in text.splitlines() if line.startswith("2. "))
+    assert "finished run" in rule2  # an empty list is only for a night where something ran
+
+
 def test_fake_engine_records_prompts():
     findings = Findings.model_validate(GOOD)
     engine = FakeEngine(findings)
