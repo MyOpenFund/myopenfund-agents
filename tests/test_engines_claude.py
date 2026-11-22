@@ -1,0 +1,202 @@
+"""claude-code adapter: fake runners only, the real `claude -p` is never called."""
+
+import json
+import subprocess
+from collections.abc import Mapping
+from typing import Any
+
+import pytest
+
+from myopenfund_agents.core.findings import Findings
+from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt
+from myopenfund_agents.engines.base import EngineError
+from myopenfund_agents.engines.claude_code_engine import ClaudeCodeEngine, check_env, parse_output
+from myopenfund_agents.engines.factory import engine_from_env
+from myopenfund_agents.settings import A1Settings
+
+TOKEN = "sk-ant-oat-fake-token-value"
+ENV = {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "PATH": "/usr/bin"}
+GOOD = {
+    "findings": [
+        {
+            "source_code": "se",
+            "category": "unreadable_pdf",
+            "severity": "warn",
+            "title": "se: PDFs unreadable",
+            "diagnosis": "Three PDFs failed text extraction. The site still answers.",
+            "evidence": ["docs_failed=3"],
+        }
+    ]
+}
+BAD = {"findings": [{**GOOD["findings"][0], "category": "not_a_category"}]}
+
+
+def envelope(**kw: Any) -> str:
+    values: dict[str, Any] = {"type": "result", "subtype": "success", "is_error": False, "result": ""}
+    values.update(kw)
+    return json.dumps(values)
+
+
+class FakeRunner:
+    """Answers each call with the next (returncode, stdout) pair, or raises it if it is an exception."""
+
+    def __init__(self, *answers: tuple[int, str] | BaseException) -> None:
+        self.answers = list(answers)
+        self.calls: list[tuple[list[str], str, Mapping[str, str], float]] = []
+
+    def __call__(self, cmd, stdin_text, env, timeout_s):
+        self.calls.append((cmd, stdin_text, env, timeout_s))
+        answer = self.answers[min(len(self.calls), len(self.answers)) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        code, stdout = answer
+        return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr="")
+
+
+def engine(runner: FakeRunner, **kw: Any) -> ClaudeCodeEngine:
+    return ClaudeCodeEngine(A1Settings(), env=ENV, runner=runner, **kw)
+
+
+# --- guards -----------------------------------------------------------------------------------------------
+
+
+def test_claude_env_guards():
+    with pytest.raises(EngineError, match="ANTHROPIC_API_KEY") as info:
+        check_env({**ENV, "ANTHROPIC_API_KEY": "sk-ant-api-secret"})
+    assert "sk-ant-api-secret" not in str(info.value) and TOKEN not in str(info.value)
+    with pytest.raises(EngineError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        check_env({"PATH": "/usr/bin"})
+    with pytest.raises(EngineError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        check_env({"CLAUDE_CODE_OAUTH_TOKEN": ""})
+    check_env({**ENV, "ANTHROPIC_API_KEY": ""})  # empty key: nothing would be billed
+    with pytest.raises(EngineError, match="ANTHROPIC_API_KEY"):
+        ClaudeCodeEngine(A1Settings(), env={**ENV, "ANTHROPIC_API_KEY": "k"}, runner=FakeRunner())
+
+
+def test_claude_command_shape():
+    cmd = engine(FakeRunner()).command()
+    assert cmd[:2] == ["claude", "-p"]
+    assert cmd[cmd.index("--output-format") + 1] == "json"
+    schema = cmd[cmd.index("--json-schema") + 1]
+    assert json.loads(schema) == Findings.model_json_schema()
+    assert schema == json.dumps(Findings.model_json_schema(), separators=(",", ":"))  # compact
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--system-prompt") + 1] == A1_INSTRUCTIONS
+    assert "--bare" not in cmd and "--mcp-config" not in cmd and "--model" not in cmd
+    cmd = engine(FakeRunner(), model="sonnet", binary="/opt/claude").command()
+    assert cmd[0] == "/opt/claude"
+    assert cmd[-2:] == ["--model", "sonnet"]
+
+
+# --- parse_output -----------------------------------------------------------------------------------------
+
+
+def test_parse_structured_and_text():
+    assert parse_output(envelope(structured_output=GOOD)).keys() == {("se", "unreadable_pdf")}
+    text = "Here are the findings:\n```json\n" + json.dumps(GOOD) + "\n```\nDone."
+    assert parse_output(envelope(result=text)).keys() == {("se", "unreadable_pdf")}
+    assert parse_output(envelope(result='{"findings": []}')) == Findings()
+    with pytest.raises(EngineError):
+        parse_output(envelope(result="no json at all"))
+    with pytest.raises(EngineError):
+        parse_output(envelope(structured_output=BAD))
+    with pytest.raises(EngineError):
+        parse_output("not json")
+    with pytest.raises(EngineError):
+        parse_output("[1, 2]")
+
+
+def test_parse_is_error():
+    with pytest.raises(EngineError, match="error_during_execution") as info:
+        parse_output(envelope(subtype="error_during_execution", is_error=True, result="rate limit reached"))
+    assert "rate limit" in str(info.value)
+    long = "x" * 5000
+    with pytest.raises(EngineError) as info:
+        parse_output(envelope(is_error=True, result=long))
+    assert len(str(info.value)) < 600
+
+
+# --- diagnose ---------------------------------------------------------------------------------------------
+
+
+def test_claude_retry_then_ok():
+    runner = FakeRunner(
+        (0, "this is not json"),
+        (0, envelope(structured_output=GOOD, usage={"input_tokens": 1200, "output_tokens": 80})),
+    )
+    result = engine(runner).diagnose("night summary")
+    assert result.findings.keys() == {("se", "unreadable_pdf")}
+    assert result.retries == 1
+    assert (result.engine, result.model) == ("claude-code", "default")
+    assert (result.input_tokens, result.output_tokens) == (1200, 80)
+    assert result.seconds >= 0
+    cmd, stdin_text, env, timeout_s = runner.calls[0]
+    assert cmd[:2] == ["claude", "-p"]
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--bare" not in cmd
+    assert stdin_text == user_prompt("night summary")
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN and "ANTHROPIC_API_KEY" not in env
+    assert timeout_s == 600
+
+
+def test_claude_retries_nonzero_exit_and_schema_failure():
+    runner = FakeRunner((1, ""), (0, envelope(structured_output=BAD)), (0, envelope(structured_output=GOOD)))
+    result = engine(runner).diagnose("S")
+    assert result.retries == 2
+    assert result.input_tokens is None and result.output_tokens is None
+
+
+def test_claude_gives_up_after_cap():
+    runner = FakeRunner((0, envelope(structured_output=BAD)))
+    with pytest.raises(EngineError, match=r"claude-code \(sonnet\).*3 attempts") as info:
+        ClaudeCodeEngine(A1Settings(max_schema_retries=2), model="sonnet", env=ENV, runner=runner).diagnose("S")
+    assert len(runner.calls) == 3
+    assert TOKEN not in str(info.value)
+
+
+def test_claude_error_never_quotes_the_token():
+    def leaky(cmd, stdin_text, env, timeout_s):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=f"invalid token {TOKEN}")
+
+    with pytest.raises(EngineError, match="exit code 1: invalid token <redacted>") as info:
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).diagnose("S")
+    assert TOKEN not in str(info.value)
+
+
+def test_claude_rate_limit_is_engine_error():
+    runner = FakeRunner((1, envelope(subtype="error_during_execution", is_error=True, result="rate limit")))
+    with pytest.raises(EngineError, match=r"claude-code \(default\).*rate limit"):
+        ClaudeCodeEngine(A1Settings(max_schema_retries=1), env=ENV, runner=runner).diagnose("S")
+    assert len(runner.calls) == 2
+
+
+def test_claude_timeout_is_engine_error():
+    runner = FakeRunner(subprocess.TimeoutExpired(["claude", "-p"], 5))
+    with pytest.raises(EngineError, match=r"claude-code \(default\).*timed out") as info:
+        engine(runner, timeout_s=5).diagnose("S")
+    assert isinstance(info.value.__cause__, subprocess.TimeoutExpired)
+    assert len(runner.calls) == 1  # no retry
+
+
+def test_claude_binary_missing_is_engine_error():
+    runner = FakeRunner(FileNotFoundError(2, "No such file or directory", "claude"))
+    with pytest.raises(EngineError, match=r"claude-code \(default\)") as info:
+        engine(runner).diagnose("S")
+    assert isinstance(info.value.__cause__, FileNotFoundError)
+    assert len(runner.calls) == 1
+
+
+# --- factory ----------------------------------------------------------------------------------------------
+
+
+def test_factory_claude_code():
+    built = engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code", **ENV})
+    assert isinstance(built, ClaudeCodeEngine)
+    assert (built.name, built.model) == ("claude-code", "default")
+    built = engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code", "MOF_AGENTS_MODEL": "opus", **ENV})
+    assert built.model == "opus" and built.command()[-2:] == ["--model", "opus"]
+    with pytest.raises(EngineError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code"})
+    with pytest.raises(EngineError, match="ANTHROPIC_API_KEY"):
+        engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code", "ANTHROPIC_API_KEY": "k", **ENV})

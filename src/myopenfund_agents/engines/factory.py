@@ -21,6 +21,7 @@ def engine_from_env(settings: A1Settings, env: Mapping[str, str] | None = None) 
         built = build_model(model, env.get("MOF_AGENTS_BASE_URL") or None, env.get("MOF_AGENTS_API_KEY") or None)
         return PydanticAIEngine(built, settings, model_label=model)
     if name == "claude-code":
-        # Task 6 fills this branch.
-        raise EngineError("claude-code engine not available yet")
+        from myopenfund_agents.engines.claude_code_engine import DEFAULT_MODEL, ClaudeCodeEngine
+
+        return ClaudeCodeEngine(settings, model=env.get("MOF_AGENTS_MODEL") or DEFAULT_MODEL, env=env)
     raise EngineError(f"unknown MOF_AGENTS_ENGINE {name!r} (expected 'pydantic-ai' or 'claude-code')")
