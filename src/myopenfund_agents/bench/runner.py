@@ -163,7 +163,7 @@ def _markdown(payload: dict[str, Any], scores: list[NightScore], verdict_list: l
     lines = [
         f"# Bench: {payload['engine']} / {payload['model']} ({payload['profile']})",
         "",
-        f"Run at {payload['stamp']}.",
+        f"Run at {payload['stamp']}. Profile `{payload['profile']}`, repeat {payload['repeat']}.",
         "",
         "| Criterion | Value | Threshold | Pass |",
         "|---|---|---|---|",
@@ -194,8 +194,14 @@ def write_report(
     scores: list[NightScore],
     verdict_list: list[Verdict],
     deny: DenyList | None = None,
+    *,
+    repeat: int,
+    settings: A1Settings,
+    thresholds: Mapping[str, Any],
 ) -> Path:
     """Write `<stamp>-<engine>-<model>.{json,md}` into out_dir; return the Markdown path.
+
+    The payload records how it was produced: ``repeat``, every A1 setting and the threshold profile values.
 
     The payload must pass the sanitiser first: results are meant to be committed to a public repository.
     ``deny`` defaults to the deny-list named by ``MOF_AGENTS_DENYLIST`` (none: built-in checks only).
@@ -210,6 +216,9 @@ def write_report(
         "model": engine.model,
         "profile": profile,
         "stamp": now.isoformat(timespec="seconds"),
+        "repeat": repeat,
+        "settings": dataclasses.asdict(settings),
+        "thresholds": dict(thresholds),
         "verdicts": _jsonable(verdict_list),
         "nights": nights,
     }

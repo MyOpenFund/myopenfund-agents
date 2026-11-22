@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from pathlib import Path
 
@@ -22,6 +23,11 @@ from myopenfund_agents.engines.fake import FakeEngine
 from myopenfund_agents.settings import A1Settings
 
 THRESHOLDS = Path(__file__).resolve().parents[1] / "bench" / "thresholds.toml"
+
+
+def _rec(profile: str, repeat: int = 1, settings: A1Settings | None = None) -> dict:
+    """How a report was produced: repeat count, A1 settings and threshold profile values."""
+    return {"repeat": repeat, "settings": settings or A1Settings(), "thresholds": load_thresholds(THRESHOLDS, profile)}
 
 
 def _known_problem_night(green_history):
@@ -53,7 +59,7 @@ def test_fake_engine_scores_known_problem_as_comment(tmp_path, green_history):
     assert [s.actions_ok for s in scores] == [True]
     assert scores[0].attempts[0].actions == [("comment", "se", "unreadable_pdf")]
     assert all(v.passed for v in verdicts), verdicts
-    md = write_report(tmp_path, engine, "local", scores, verdicts)
+    md = write_report(tmp_path, engine, "local", scores, verdicts, **_rec("local", repeat=3))
     assert md.suffix == ".md" and md.with_suffix(".json").is_file()
     text = md.read_text(encoding="utf-8")
     assert "| problems found | 100% (1/1)" in text
@@ -68,7 +74,7 @@ def test_report_name_replaces_model_separators(tmp_path, green_history):
     n = _known_problem_night(green_history)
     engine = FakeEngine(_se_unreadable(), model="ollama/qwen3:8b")
     scores, verdicts = run_bench([n], engine, A1Settings(), 1, load_thresholds(THRESHOLDS, "prod"))
-    md = write_report(tmp_path, engine, "prod", scores, verdicts)
+    md = write_report(tmp_path, engine, "prod", scores, verdicts, **_rec("prod"))
     assert md.name.endswith("-fake-ollama_qwen3_8b.md")
 
 
@@ -77,7 +83,7 @@ def test_report_refused_when_payload_has_infra_detail(tmp_path, green_history):
     engine = FakeEngine(_se_unreadable(), model="100.64.1.2")
     scores, verdicts = run_bench([n], engine, A1Settings(), 1, load_thresholds(THRESHOLDS, "local"))
     with pytest.raises(ValueError, match="report refused") as err:
-        write_report(tmp_path / "out", engine, "local", scores, verdicts)
+        write_report(tmp_path / "out", engine, "local", scores, verdicts, **_rec("local"))
     assert "100.64.1.2" not in str(err.value)
     assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
 
@@ -206,14 +212,16 @@ def test_write_report_uses_given_deny_list(tmp_path, green_history):
     scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
                                  load_thresholds(THRESHOLDS, "local"))  # fmt: skip
     with pytest.raises(ValueError, match="report refused"):
-        write_report(tmp_path, engine, "local", scores, verdicts, deny=DenyList(hosts=["mirror.example.org"]))
+        write_report(
+            tmp_path, engine, "local", scores, verdicts, deny=DenyList(hosts=["mirror.example.org"]), **_rec("local")
+        )
 
 
 def test_report_wraps_keys_in_backticks(tmp_path, green_history):
     engine = FakeEngine(_se_unreadable())
     scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
                                  load_thresholds(THRESHOLDS, "local"))  # fmt: skip
-    text = write_report(tmp_path, engine, "local", scores, verdicts).read_text(encoding="utf-8")
+    text = write_report(tmp_path, engine, "local", scores, verdicts, **_rec("local")).read_text(encoding="utf-8")
     assert "| `se/unreadable_pdf` |" in text
 
 
@@ -326,7 +334,7 @@ def test_report_json_carries_findings_and_tokens(tmp_path, green_history):
     engine = _TokenEngine(_se_unreadable())
     scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
                                  load_thresholds(THRESHOLDS, "local"))  # fmt: skip
-    md = write_report(tmp_path, engine, "local", scores, verdicts)
+    md = write_report(tmp_path, engine, "local", scores, verdicts, **_rec("local"))
     attempt = json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))["nights"][0]["attempts"][0]
     assert attempt["input_tokens"] == 1200 and attempt["output_tokens"] == 80
     assert attempt["findings"][0]["title"] == "se: unreadable PDFs"
@@ -344,7 +352,8 @@ def test_report_withholds_finding_texts_with_infra_detail(tmp_path, green_histor
     engine = _TokenEngine(Findings(findings=[finding]))
     scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
                                  load_thresholds(THRESHOLDS, "local"))  # fmt: skip
-    md = write_report(tmp_path, engine, "local", scores, verdicts, deny=DenyList(hosts=["mirror.example.org"]))
+    deny = DenyList(hosts=["mirror.example.org"])
+    md = write_report(tmp_path, engine, "local", scores, verdicts, deny=deny, **_rec("local"))
     text = md.with_suffix(".json").read_text(encoding="utf-8")
     assert "100.64.1.2" not in text and "mirror.example.org" not in text and "abcdef123456" not in text
     got = json.loads(text)["nights"][0]["attempts"][0]["findings"][0]
@@ -397,3 +406,18 @@ def test_cli_capture_passes_denylist_entries(tmp_path, monkeypatch, green_histor
     monkeypatch.setenv("MOF_AGENTS_DENYLIST", str(deny))
     assert cli.main(_capture_args(tmp_path / "nights")) == 0
     assert seen["deny"].hosts == ["nas.example.lan"] and seen["deny"].path_roots == ["/srv/private/"]
+
+
+def test_report_records_how_it_was_produced(tmp_path, green_history):
+    engine = FakeEngine(_se_unreadable())
+    settings = A1Settings(volume_drop_ratio=0.3, engine_timeout_s=120.0)
+    t = load_thresholds(THRESHOLDS, "local")
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, settings, 2, t)
+    md = write_report(tmp_path, engine, "local", scores, verdicts, repeat=2, settings=settings, thresholds=t)
+    payload = json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))
+    assert payload["repeat"] == 2
+    assert payload["settings"]["volume_drop_ratio"] == 0.3 and payload["settings"]["engine_timeout_s"] == 120.0
+    assert set(payload["settings"]) == set(dataclasses.asdict(A1Settings()))
+    assert payload["thresholds"] == t
+    text = md.read_text(encoding="utf-8")
+    assert "Profile `local`, repeat 2." in text

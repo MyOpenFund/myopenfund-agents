@@ -179,7 +179,17 @@ def _run(args: argparse.Namespace) -> int:
         print(f"{'PASS' if v.passed else 'FAIL'} {v.criterion}: {v.value:g} (threshold {v.threshold:g})")
     passed = all(v.passed for v in verdict_list)
     try:
-        md = write_report(args.results, engine, args.profile, scores, verdict_list, deny)
+        md = write_report(
+            args.results,
+            engine,
+            args.profile,
+            scores,
+            verdict_list,
+            deny,
+            repeat=args.repeat,
+            settings=settings,
+            thresholds=thresholds,
+        )
     except ValueError as exc:
         _err(str(exc))
         return EXIT_FAIL
