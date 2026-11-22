@@ -58,7 +58,10 @@ is missing.
 ## A1 settings (`MOF_AGENTS_A1_*`)
 
 Every threshold is a setting, overridden by `MOF_AGENTS_A1_<NAME>` (for example
-`MOF_AGENTS_A1_VOLUME_DROP_RATIO=0.3`).
+`MOF_AGENTS_A1_VOLUME_DROP_RATIO=0.3`). An out-of-range value stops the run with an error naming the
+variable: decimal settings must be finite and above 0 (`TEMPERATURE` may be 0), whole-number settings
+must be 0 or more (`VOLUME_WINDOW_NIGHTS`, `SUMMARY_CHAR_BUDGET` and `ERROR_SAMPLE_MAX_CHARS` at least 1).
+There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instead.
 
 | Setting | Default | Meaning |
 |---|---|---|
