@@ -31,6 +31,11 @@ def fingerprint(repo: str, f: Finding) -> str:
     return f"{AGENT}:{repo}:{f.source_code}:{f.category.value}"
 
 
+def summary_fingerprint(repo: str) -> str:
+    """The summary issue's own fingerprint: never shared with a real ('*', unknown) finding."""
+    return f"{AGENT}:{repo}:*:summary"
+
+
 def group_outages(findings: Findings, settings: A1Settings) -> Findings:
     codes: dict[Category, set[str]] = {}
     for f in findings.findings:
@@ -118,4 +123,4 @@ def _summary(news: list[Action], default_repo: str) -> Action:
         diagnosis="Too many new problems for individual issues:\n" + "\n".join(lines),
         evidence=[a.fingerprint for a in news[:5]],
     )
-    return Action(Kind.SUMMARY_ISSUE, fingerprint(default_repo, finding), default_repo, finding)
+    return Action(Kind.SUMMARY_ISSUE, summary_fingerprint(default_repo), default_repo, finding)
