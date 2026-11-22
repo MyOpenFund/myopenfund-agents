@@ -3,7 +3,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import httpx2
 import pytest
 from mcp.types import CallToolResult, TextContent
 
@@ -11,7 +10,7 @@ from conftest import END, START
 from myopenfund_agents.bench.capture import (
     PAGE,
     CaptureError,
-    _transport_failure,
+    _guarded,
     _unwrap_result,
     capture_night,
     source_codes,
@@ -321,9 +320,33 @@ def test_cadence_refused_when_now_before_night_end():
     assert _capture(call, sources=["aa"], now=END).cadence is not None
 
 
-def test_transport_failure_detection():
-    assert _transport_failure(httpx2.ConnectError("refused"))
-    assert _transport_failure(OSError("unreachable"))
-    assert _transport_failure(ExceptionGroup("tg", [ValueError("x"), httpx2.ReadTimeout("slow")]))
-    assert not _transport_failure(ExceptionGroup("tg", [ValueError("x")]))
-    assert not _transport_failure(ValueError("x"))
+def test_guarded_maps_any_failure_to_type_name_only():
+    secret = "Bearer sekret-token-value"
+
+    def boom(exc):
+        def run():
+            raise exc
+
+        return run
+
+    for exc in (
+        ConnectionError(f"refused with {secret}"),
+        ValueError(secret),
+        ExceptionGroup("tg", [ValueError(secret), OSError(secret)]),
+    ):
+        with pytest.raises(CaptureError) as info:
+            _guarded(boom(exc))
+        assert str(info.value) == f"MCP call failed: {type(exc).__name__}"
+        assert info.value.__cause__ is None and info.value.__suppress_context__
+    with pytest.raises(CaptureError, match="history incomplete"):
+        _guarded(boom(CaptureError("history incomplete")))
+    assert _guarded(lambda: {"ok": 1}) == {"ok": 1}
+
+
+def test_mcp_sdk_symbols_used_by_capture_exist():
+    """mcp_caller is not covered offline: a renamed SDK symbol must still fail CI."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+
+    assert callable(create_mcp_http_client) and callable(streamable_http_client) and ClientSession
+    assert {"is_error", "structured_content"} <= set(CallToolResult.model_fields)

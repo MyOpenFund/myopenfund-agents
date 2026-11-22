@@ -225,13 +225,18 @@ def _first_text(result: Any) -> str | None:
     return None
 
 
-def _transport_failure(exc: BaseException) -> bool:
-    """A connection or transport failure (httpx, OSError), possibly inside an ExceptionGroup."""
-    import httpx2
+def _guarded(run: Callable[[], Any]) -> Any:
+    """Run one MCP call; any failure other than CaptureError becomes a CaptureError naming its type only.
 
-    if isinstance(exc, BaseExceptionGroup):
-        return any(_transport_failure(e) for e in exc.exceptions)
-    return isinstance(exc, (httpx2.HTTPError, OSError))
+    Never the message: it may quote the request, its headers or the token. The SDK's transport, protocol
+    and task-group errors all land here, so no transport package is imported directly.
+    """
+    try:
+        return run()
+    except CaptureError:
+        raise
+    except Exception as exc:
+        raise CaptureError(f"MCP call failed: {type(exc).__name__}") from None
 
 
 def mcp_caller(url: str, token: str) -> CallTool:  # pragma: no cover - network; exercised in Task 14
@@ -251,14 +256,6 @@ def mcp_caller(url: str, token: str) -> CallTool:  # pragma: no cover - network;
         return _unwrap_result(result)
 
     def call(name: str, args: dict) -> Any:
-        try:
-            return asyncio.run(_call(name, args))
-        except CaptureError:
-            raise
-        except Exception as exc:
-            if _transport_failure(exc):
-                # Type name only: never the request, its headers or the token.
-                raise CaptureError(f"MCP connection failed: {type(exc).__name__}") from None
-            raise
+        return _guarded(lambda: asyncio.run(_call(name, args)))
 
     return call
