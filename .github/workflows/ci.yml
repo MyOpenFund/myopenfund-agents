@@ -54,4 +54,11 @@ jobs:
           cat ollama.log >&2
           exit 1
       - run: ollama pull "$MOF_AGENTS_TEST_MODEL"
-      - run: pytest -q -m local_llm
+      - name: Local model test (a skip fails the job)
+        run: |
+          set -o pipefail
+          pytest -q -m local_llm -rs | tee local-llm.log
+          if grep -q "skipped" local-llm.log; then
+            echo "the local_llm test was skipped (is MOF_AGENTS_TEST_MODEL set?)" >&2
+            exit 1
+          fi
