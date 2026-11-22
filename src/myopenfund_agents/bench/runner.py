@@ -206,10 +206,10 @@ def write_report(
     The payload records how it was produced: ``repeat``, every A1 setting and the threshold profile values.
 
     The payload must pass the sanitiser first: results are meant to be committed to a public repository.
-    ``deny`` defaults to the deny-list named by ``MOF_AGENTS_DENYLIST`` (none: built-in checks only).
+    ``deny`` defaults to the deny-list named by ``MOF_AGENTS_DENYLIST`` (unset or empty: built-in checks only).
     """
     if deny is None:
-        deny = DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
+        deny = DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST") or None)  # empty reads as unset, as in the CLI
     now = datetime.now(UTC)
     nights = _jsonable(scores)
     _withhold_finding_texts(nights, deny)

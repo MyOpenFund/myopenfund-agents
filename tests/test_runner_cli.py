@@ -423,6 +423,15 @@ def test_report_records_how_it_was_produced(tmp_path, green_history):
     assert "Profile `local`, repeat 2." in text
 
 
+def test_write_report_empty_denylist_env_reads_as_unset(tmp_path, monkeypatch, green_history):
+    monkeypatch.setenv("MOF_AGENTS_DENYLIST", "")
+    engine = FakeEngine(_se_unreadable())
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
+                                 load_thresholds(THRESHOLDS, "local"))  # fmt: skip
+    md = write_report(tmp_path, engine, "local", scores, verdicts, **_rec("local"))
+    assert md.exists()
+
+
 def test_run_night_no_run_does_not_comment_on_chronic_issue(green_history):
     """A no-run night with an open chronic ('*', unknown) issue opens its own no-run issue."""
     from myopenfund_agents.core.inputs import OpenIssue
