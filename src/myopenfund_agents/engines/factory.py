@@ -23,5 +23,10 @@ def engine_from_env(settings: A1Settings, env: Mapping[str, str] | None = None) 
     if name == "claude-code":
         from myopenfund_agents.engines.claude_code_engine import DEFAULT_MODEL, ClaudeCodeEngine
 
-        return ClaudeCodeEngine(settings, model=env.get("MOF_AGENTS_MODEL") or DEFAULT_MODEL, env=env)
+        return ClaudeCodeEngine(
+            settings,
+            model=env.get("MOF_AGENTS_MODEL") or DEFAULT_MODEL,
+            timeout_s=settings.engine_timeout_s,
+            env=env,
+        )
     raise EngineError(f"unknown MOF_AGENTS_ENGINE {name!r} (expected 'pydantic-ai' or 'claude-code')")

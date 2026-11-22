@@ -20,6 +20,7 @@ class A1Settings:
     max_new_issues_per_run: int = 5
     max_schema_retries: int = 2
     temperature: float = 0.0
+    engine_timeout_s: float = 600.0  # one model request (pydantic-ai) or one `claude -p` call (claude-code)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "A1Settings":

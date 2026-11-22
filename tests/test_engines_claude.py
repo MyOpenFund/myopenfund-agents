@@ -274,3 +274,16 @@ def test_factory_claude_code():
         engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code"})
     with pytest.raises(EngineError, match="ANTHROPIC_API_KEY"):
         engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code", "ANTHROPIC_API_KEY": "k", **ENV})
+
+
+def test_claude_timeout_from_settings_unless_explicit():
+    runner = FakeRunner((0, envelope(structured_output=GOOD)))
+    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner).diagnose("S")
+    assert runner.calls[-1][3] == 42.0
+    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner, timeout_s=7).diagnose("S")
+    assert runner.calls[-1][3] == 7
+
+
+def test_factory_claude_code_uses_timeout_setting():
+    built = engine_from_env(A1Settings(engine_timeout_s=42.0), {**ENV, "MOF_AGENTS_ENGINE": "claude-code"})
+    assert built._timeout_s == 42.0

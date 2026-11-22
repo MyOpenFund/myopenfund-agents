@@ -231,3 +231,25 @@ def test_banner_disabled_by_default_without_overriding(monkeypatch):
     monkeypatch.setenv("PYDANTIC_AI_NO_BANNER", "0")
     PydanticAIEngine(scripted(GOOD)[0], A1Settings())
     assert os.environ["PYDANTIC_AI_NO_BANNER"] == "0"
+
+
+def test_pydantic_ai_passes_engine_timeout():
+    seen: dict[str, Any] = {}
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.update(info.model_settings or {})
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"findings": []})])
+
+    PydanticAIEngine(FunctionModel(fn), A1Settings(engine_timeout_s=42.0)).diagnose("S")
+    assert seen["timeout"] == 42.0 and seen["request_timeout"] == 42.0
+
+
+def test_pydantic_ai_slow_model_times_out_as_engine_error():
+    import asyncio
+
+    async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await asyncio.sleep(5)
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"findings": []})])
+
+    with pytest.raises(EngineError, match="ModelRequestTimeout"):
+        PydanticAIEngine(FunctionModel(slow), A1Settings(engine_timeout_s=0.05)).diagnose("S")

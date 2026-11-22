@@ -18,3 +18,8 @@ def test_env_override():
 def test_env_bad_value_raises():
     with pytest.raises(ValueError, match="MOF_AGENTS_A1_MIN_HISTORY_NIGHTS"):
         A1Settings.from_env({"MOF_AGENTS_A1_MIN_HISTORY_NIGHTS": "three"})
+
+
+def test_engine_timeout_setting():
+    assert A1Settings().engine_timeout_s == 600.0
+    assert A1Settings.from_env({"MOF_AGENTS_A1_ENGINE_TIMEOUT_S": "30"}).engine_timeout_s == 30.0

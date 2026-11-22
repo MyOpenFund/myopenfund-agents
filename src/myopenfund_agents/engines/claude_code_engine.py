@@ -117,14 +117,14 @@ class ClaudeCodeEngine:
         settings: A1Settings,
         model: str = DEFAULT_MODEL,
         binary: str = "claude",
-        timeout_s: float = 600,
+        timeout_s: float | None = None,
         env: Mapping[str, str] | None = None,
         runner: Runner = _run,
     ) -> None:
         self.model = model
         self._settings = settings
         self._binary = binary
-        self._timeout_s = timeout_s
+        self._timeout_s = settings.engine_timeout_s if timeout_s is None else timeout_s
         self._env: Mapping[str, str] = os.environ if env is None else env
         self._runner = runner
         check_env(self._env)

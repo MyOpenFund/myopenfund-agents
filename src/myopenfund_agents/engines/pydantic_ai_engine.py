@@ -46,7 +46,12 @@ class PydanticAIEngine:
                 output_type=Findings,
                 instructions=A1_INSTRUCTIONS,
                 retries=settings.max_schema_retries,
-                model_settings={"temperature": settings.temperature},
+                model_settings={
+                    "temperature": settings.temperature,
+                    # `timeout`: each HTTP attempt; `request_timeout`: the whole request, SDK retries included.
+                    "timeout": settings.engine_timeout_s,
+                    "request_timeout": settings.engine_timeout_s,
+                },
             )
         except CONSTRUCTION_FAILURES as exc:
             raise EngineError(f"{self.name} ({self.model}): cannot build the agent: {exc}") from exc
