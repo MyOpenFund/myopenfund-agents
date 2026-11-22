@@ -66,3 +66,19 @@ def test_summary_issue_above_cap():
     assert s.repo == "d" and s.finding.severity == Severity.ERROR and s.finding.source_code == "*"
     assert "6 new problems" in s.finding.title and len(s.finding.evidence) == 5
     assert s.fingerprint == fingerprint("d", s.finding)
+
+
+def test_summary_issue_deduplicated_against_open_issue():
+    cats = list(Category)[:4] + [Category.UNKNOWN]
+    fs = Findings(findings=[_f(f"s{i}", cats[i % 5]) for i in range(5)] + [_f("t", Category.PARSE_ERROR)])
+    open_summary = OpenIssue(fingerprint="a1:d:*:unknown", number=9, repo="d")
+    acts = plan_actions(fs, [open_summary], {}, "d", S)
+    assert [(a.kind, a.issue_number, a.repo) for a in acts] == [(Kind.COMMENT, 9, "d")]
+    assert acts[0].fingerprint == "a1:d:*:unknown"
+
+
+def test_general_outage_with_real_source_normalised():
+    out = group_outages(Findings(findings=[_f("zz", Category.GENERAL_OUTAGE)]), S)
+    assert [f.source_code for f in out.findings] == ["*"]
+    acts = plan_actions(Findings(findings=[_f("zz", Category.GENERAL_OUTAGE)]), [], {"zz": "other"}, "d", S)
+    assert acts[0].fingerprint == "a1:d:*:general_outage"

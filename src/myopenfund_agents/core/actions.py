@@ -48,7 +48,7 @@ def group_outages(findings: Findings, settings: A1Settings) -> Findings:
                 placed = True
         elif f.category == Category.GENERAL_OUTAGE:
             if not placed:
-                out.append(f)
+                out.append(f if f.source_code == "*" else f.model_copy(update={"source_code": "*"}))
                 placed = True
         else:
             out.append(f)
@@ -92,7 +92,11 @@ def plan_actions(
             news.append(Action(Kind.NEW_ISSUE, fp, repo, f))
     if len(news) <= settings.max_new_issues_per_run:
         return [*comments, *news]
-    return [*comments, _summary(news, default_repo)]
+    summary = _summary(news, default_repo)
+    issue = open_by_fp.get(summary.fingerprint)
+    if issue is not None:
+        summary = Action(Kind.COMMENT, summary.fingerprint, issue.repo, summary.finding, issue.number)
+    return [*comments, summary]
 
 
 def _summary(news: list[Action], default_repo: str) -> Action:
