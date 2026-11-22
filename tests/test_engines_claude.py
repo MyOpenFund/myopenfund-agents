@@ -1,7 +1,9 @@
 """claude-code adapter: fake runners only, the real `claude -p` is never called."""
 
 import json
+import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,7 +12,13 @@ import pytest
 from myopenfund_agents.core.findings import Findings
 from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt
 from myopenfund_agents.engines.base import EngineError
-from myopenfund_agents.engines.claude_code_engine import ClaudeCodeEngine, check_env, parse_output
+from myopenfund_agents.engines.claude_code_engine import (
+    REASON_CHARS,
+    ClaudeCodeEngine,
+    _run,
+    check_env,
+    parse_output,
+)
 from myopenfund_agents.engines.factory import engine_from_env
 from myopenfund_agents.settings import A1Settings
 
@@ -159,16 +167,82 @@ def test_claude_error_never_quotes_the_token():
     def leaky(cmd, stdin_text, env, timeout_s):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=f"invalid token {TOKEN}")
 
-    with pytest.raises(EngineError, match="exit code 1: invalid token <redacted>") as info:
+    with pytest.raises(EngineError, match="exit code 1: .*stderr: invalid token <redacted>") as info:
         ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).diagnose("S")
     assert TOKEN not in str(info.value)
 
 
-def test_claude_rate_limit_is_engine_error():
-    runner = FakeRunner((1, envelope(subtype="error_during_execution", is_error=True, result="rate limit")))
-    with pytest.raises(EngineError, match=r"claude-code \(default\).*rate limit"):
-        ClaudeCodeEngine(A1Settings(max_schema_retries=1), env=ENV, runner=runner).diagnose("S")
-    assert len(runner.calls) == 2
+@pytest.mark.parametrize("code", [0, 1])
+def test_claude_rate_limit_fails_fast(code):
+    runner = FakeRunner((code, envelope(subtype="error_during_execution", is_error=True, result="rate limit")))
+    with pytest.raises(EngineError, match=r"claude-code \(default\).*error_during_execution.*rate limit"):
+        ClaudeCodeEngine(A1Settings(max_schema_retries=2), env=ENV, runner=runner).diagnose("S")
+    assert len(runner.calls) == 1  # is_error is not retried
+
+
+def test_parse_requires_findings_key():
+    with pytest.raises(EngineError, match="findings"):
+        parse_output(envelope(result="Sorry, I cannot {}"))
+    with pytest.raises(EngineError, match="findings"):
+        parse_output(envelope(structured_output={}))
+    with pytest.raises(EngineError, match="findings"):
+        parse_output(envelope(result='{"answer": 1}'))
+
+
+def test_claude_no_silent_empty_findings():
+    runner = FakeRunner((0, envelope(result="Sorry, I cannot {}")))
+    with pytest.raises(EngineError, match=r"3 attempts.*findings"):
+        engine(runner).diagnose("S")
+    assert len(runner.calls) == 3
+
+
+@pytest.mark.parametrize("cut", [-5, -1, 0, 3, 10])
+def test_claude_redacts_token_straddling_the_cut(cut):
+    # Place the token so that it straddles the REASON_CHARS truncation of stdout (quoted after a prefix) or stderr.
+    pad = "x" * (REASON_CHARS - len("output is not JSON: ") + cut - len(TOKEN) // 2)
+    leaky_out = pad + TOKEN + " tail" * 80
+    leaky_err = "y" * (REASON_CHARS + cut - len(TOKEN) // 2) + TOKEN + " tail" * 80
+
+    def leaky(cmd, stdin_text, env, timeout_s):
+        return subprocess.CompletedProcess(cmd, 1, stdout=leaky_out, stderr=leaky_err)
+
+    with pytest.raises(EngineError) as info:
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).diagnose("S")
+    message = str(info.value)
+    for prefix in (TOKEN[:6], TOKEN[-6:]):
+        assert prefix not in message
+
+
+def test_claude_nonzero_exit_non_json_keeps_stderr():
+    def failing(cmd, stdin_text, env, timeout_s):
+        return subprocess.CompletedProcess(cmd, 2, stdout="Error: something", stderr="network unreachable")
+
+    with pytest.raises(EngineError, match=r"exit code 2: output is not JSON.*stderr: network unreachable"):
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=failing).diagnose("S")
+
+
+def test_default_runner_replaces_undecodable_bytes():
+    cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok\\xff\\xfe')"]
+    completed = _run(cmd, "", dict(os.environ), 30)
+    assert completed.returncode == 0
+    assert completed.stdout.startswith("ok") and "\ufffd" in completed.stdout
+
+
+def test_claude_decode_error_is_engine_error():
+    runner = FakeRunner(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
+    with pytest.raises(EngineError, match=r"claude-code \(default\).*UnicodeDecodeError") as info:
+        engine(runner).diagnose("S")
+    assert isinstance(info.value.__cause__, UnicodeDecodeError)
+
+
+@pytest.mark.parametrize(
+    "var", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]
+)
+def test_claude_billing_vars_refused(var):
+    with pytest.raises(EngineError, match=var) as info:
+        check_env({**ENV, var: "secret-value-1"})
+    assert "secret-value-1" not in str(info.value)
+    check_env({**ENV, var: ""})
 
 
 def test_claude_timeout_is_engine_error():

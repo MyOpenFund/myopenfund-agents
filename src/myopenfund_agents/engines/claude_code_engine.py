@@ -23,6 +23,9 @@ Runner = Callable[[list[str], str, Mapping[str, str], float], subprocess.Complet
 
 TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 API_KEY_VAR = "ANTHROPIC_API_KEY"
+# Each of these can divert the CLI off the subscription to billed usage (API key auth, Bedrock, Vertex).
+BILLING_VARS = (API_KEY_VAR, "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+SECRET_VARS = (TOKEN_VAR, API_KEY_VAR, "ANTHROPIC_AUTH_TOKEN")
 DEFAULT_MODEL = "default"
 REASON_CHARS = 300  # longest slice of CLI output quoted in an error message
 
@@ -34,6 +37,7 @@ def _run(cmd: list[str], stdin_text: str, env: Mapping[str, str], timeout_s: flo
         input=stdin_text,
         capture_output=True,
         text=True,
+        errors="replace",  # undecodable bytes must not raise UnicodeDecodeError
         timeout=timeout_s,
         cwd=tempfile.gettempdir(),
         env=dict(env),
@@ -43,8 +47,9 @@ def _run(cmd: list[str], stdin_text: str, env: Mapping[str, str], timeout_s: flo
 
 def check_env(env: Mapping[str, str]) -> None:
     """Refuse an environment that would bill the API or has no subscription token. Never quotes the values."""
-    if env.get(API_KEY_VAR):
-        raise EngineError(f"claude-code: {API_KEY_VAR} is set; unset it (claude-code must run on the subscription)")
+    for var in BILLING_VARS:
+        if env.get(var):
+            raise EngineError(f"claude-code: {var} is set; unset it (claude-code must run on the subscription)")
     if not env.get(TOKEN_VAR):
         raise EngineError(f"claude-code: {TOKEN_VAR} is required (run `claude setup-token` to create one)")
 
@@ -54,7 +59,14 @@ def _short(text: str) -> str:
     return text if len(text) <= REASON_CHARS else text[: REASON_CHARS - 1] + "…"
 
 
+class CLIError(EngineError):
+    """The CLI itself reported `is_error` (rate limit, auth, execution error): not retried."""
+
+
 def _validate(data: Any, where: str) -> Findings:
+    # A missing `findings` key would validate as an empty list: a silent clean night (Review Focus 3).
+    if not isinstance(data, dict) or "findings" not in data:
+        raise EngineError(f"{where} has no 'findings' key")
     try:
         return Findings.model_validate(data)
     except ValidationError as exc:
@@ -77,7 +89,7 @@ def parse_output(stdout: str) -> Findings:
     if data.get("is_error"):
         detail = data.get("result")
         detail = _short(detail) if isinstance(detail, str) else ""
-        raise EngineError(f"CLI error ({data.get('subtype', 'unknown')}): {detail}".rstrip(": "))
+        raise CLIError(f"CLI error ({data.get('subtype', 'unknown')}): {detail}".rstrip(": "))
     structured = data.get("structured_output")
     if isinstance(structured, dict):
         return _validate(structured, "structured_output")
@@ -136,12 +148,16 @@ class ClaudeCodeEngine:
             cmd += ["--model", self.model]
         return cmd
 
-    def _fail(self, message: str) -> EngineError:
-        for var in (TOKEN_VAR, API_KEY_VAR):  # defence in depth: CLI output must never leak a secret
+    def _redact(self, text: str) -> str:
+        """Remove secret values from CLI output before anything is parsed, shortened or quoted."""
+        for var in SECRET_VARS:
             secret = self._env.get(var)
             if secret:
-                message = message.replace(secret, "<redacted>")
-        return EngineError(f"{self.name} ({self.model}): {message}")
+                text = text.replace(secret, "<redacted>")
+        return text
+
+    def _fail(self, message: str) -> EngineError:
+        return EngineError(f"{self.name} ({self.model}): {self._redact(message)}")
 
     def diagnose(self, summary_text: str) -> EngineResult:
         cmd, prompt = self.command(), user_prompt(summary_text)
@@ -153,21 +169,21 @@ class ClaudeCodeEngine:
                 completed = self._runner(cmd, prompt, self._env, self._timeout_s)
             except subprocess.TimeoutExpired as exc:
                 raise self._fail(f"timed out after {self._timeout_s:g} s") from exc
-            except OSError as exc:
+            except (OSError, ValueError) as exc:  # binary missing; ValueError covers UnicodeDecodeError
                 raise self._fail(f"cannot run {self._binary!r}: {type(exc).__name__}: {exc}") from exc
-            stdout = completed.stdout or ""
-            if completed.returncode != 0:
-                try:
-                    parse_output(stdout)
-                    detail = _short(completed.stderr or "")
-                except EngineError as exc:
-                    detail = str(exc) if stdout.strip() else _short(completed.stderr or "")
-                reason = f"exit code {completed.returncode}" + (f": {detail}" if detail else "")
-                continue
+            stdout = self._redact(completed.stdout or "")
+            stderr = _short(self._redact(completed.stderr or ""))
             try:
                 findings = parse_output(stdout)
+            except CLIError as exc:  # rate limit, auth, execution error: fail fast, no retry
+                raise self._fail(f"{exc} (exit code {completed.returncode})") from exc
             except EngineError as exc:
                 reason = str(exc)
+                if completed.returncode != 0:
+                    reason = f"exit code {completed.returncode}: {reason}" + (f"; stderr: {stderr}" if stderr else "")
+                continue
+            if completed.returncode != 0:
+                reason = f"exit code {completed.returncode}" + (f"; stderr: {stderr}" if stderr else "")
                 continue
             usage = json.loads(stdout).get("usage")
             usage = usage if isinstance(usage, dict) else {}
