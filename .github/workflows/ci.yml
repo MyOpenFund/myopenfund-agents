@@ -21,11 +21,13 @@ jobs:
       - run: pytest -q
 
   local-llm:
-    timeout-minutes: 45
+    timeout-minutes: 75
     needs: test
     runs-on: ubuntu-latest
     env:
       MOF_AGENTS_TEST_MODEL: qwen3:4b
+      # hosted CPU runners are slow; the engine timeout setting is the documented knob
+      MOF_AGENTS_A1_ENGINE_TIMEOUT_S: "1500"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
