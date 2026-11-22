@@ -1,22 +1,19 @@
 """pydantic-ai engine: any OpenAI-compatible endpoint (Ollama, llama.cpp, vLLM) or a pydantic-ai model string."""
 
 import os
+import time
 
-os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+import openai
+from pydantic_ai import Agent
+from pydantic_ai.exceptions import AgentRunError, UserError
+from pydantic_ai.models import Model
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
-import time  # noqa: E402
-
-import openai  # noqa: E402
-from pydantic_ai import Agent  # noqa: E402
-from pydantic_ai.exceptions import AgentRunError, UserError  # noqa: E402
-from pydantic_ai.models import Model  # noqa: E402
-from pydantic_ai.models.openai import OpenAIChatModel  # noqa: E402
-from pydantic_ai.providers.openai import OpenAIProvider  # noqa: E402
-
-from myopenfund_agents.core.findings import Findings  # noqa: E402
-from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt  # noqa: E402
-from myopenfund_agents.engines.base import EngineError, EngineResult  # noqa: E402
-from myopenfund_agents.settings import A1Settings  # noqa: E402
+from myopenfund_agents.core.findings import Findings
+from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt
+from myopenfund_agents.engines.base import EngineError, EngineResult
+from myopenfund_agents.settings import A1Settings
 
 # AgentRunError covers UnexpectedModelBehavior and every ModelAPIError (HTTP, connection, timeout);
 # the others are transport errors a model implementation may let through unwrapped.
@@ -26,6 +23,8 @@ ENGINE_FAILURES: tuple[type[BaseException], ...] = (
     OSError,  # ConnectionError, ConnectionRefusedError, TimeoutError
     openai.APIError,  # pydantic-ai already maps these to ModelAPIError; kept as a safety net
 )
+# A provider string whose package is not installed (`anthropic:...`, `groq:...`) fails while the agent is built.
+CONSTRUCTION_FAILURES: tuple[type[BaseException], ...] = (*ENGINE_FAILURES, ImportError)
 
 
 def build_model(model: str, base_url: str | None, api_key: str | None) -> Model | str:
@@ -40,6 +39,7 @@ class PydanticAIEngine:
 
     def __init__(self, model: Model | str, settings: A1Settings, model_label: str | None = None) -> None:
         self.model = model_label or (model if isinstance(model, str) else model.model_name)
+        os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")  # default only; the user may override it
         try:
             self._agent = Agent(
                 model,
@@ -48,7 +48,7 @@ class PydanticAIEngine:
                 retries=settings.max_schema_retries,
                 model_settings={"temperature": settings.temperature},
             )
-        except ENGINE_FAILURES as exc:
+        except CONSTRUCTION_FAILURES as exc:
             raise EngineError(f"{self.name} ({self.model}): cannot build the agent: {exc}") from exc
 
     def diagnose(self, summary_text: str) -> EngineResult:
@@ -58,7 +58,11 @@ class PydanticAIEngine:
         except ENGINE_FAILURES as exc:
             raise EngineError(f"{self.name} ({self.model}): {type(exc).__name__}: {exc}") from exc
         seconds = time.monotonic() - start
-        usage = result.usage  # a property in pydantic-ai 2.x
+        # A property in pydantic-ai 2.x, a method in some 1.x releases. The 2.x RunUsage is itself callable
+        # (deprecated shim), so test for the data rather than `callable`.
+        usage = result.usage
+        if not hasattr(usage, "requests"):
+            usage = usage()
         return EngineResult(
             findings=result.output,
             engine=self.name,
