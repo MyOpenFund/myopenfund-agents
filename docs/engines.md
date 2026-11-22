@@ -135,7 +135,13 @@ A trap damages a green night in one known way and states exactly what A1 must re
 | `no_run` | no run and no source run tonight: the scheduler did not fire | `(*, unknown)` | `new_issue` |
 
 `no_run` is an addition to the spec's trap list, pending approval. The instructions tell the model to
-report exactly one `(*, unknown)` error finding when the summary says `No run finished during this night.`
+report one `(*, unknown)` error finding for the missing run when the summary says
+`No run finished during this night.`, in addition to findings for any unusual sources. On such a night
+the deterministic layer gives that finding its own fingerprint, `a1:<default_repo>:*:no_run`, so it is
+never mistaken for the chronic `a1:<default_repo>:*:unknown` issue of a failing run without per-source
+detail: a no-run night opens (or comments on) its own no-run issue. The trap refuses a base that already
+carries an open `*:no_run` issue, or that still shows unusual sources once its runs are removed
+(discovery errors or overdue cadence), so those two situations are not measured.
 
 ### Run the bench
 
