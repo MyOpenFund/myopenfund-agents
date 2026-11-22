@@ -1,0 +1,15 @@
+# Values approved 2026-11-22 (E6); they are settings, change them here only.
+[prod]
+min_recall = 1.0
+max_false_alarms = 0
+min_actions_ok = 1.0
+min_valid = 1.0
+min_agreement = 1.0
+
+[local]
+min_recall = 0.8
+max_false_alarms = 0
+min_actions_ok = 1.0
+min_valid = 1.0
+min_agreement = 0.66
+max_seconds_per_night = 600
