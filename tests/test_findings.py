@@ -27,8 +27,16 @@ def test_unknown_category_rejected():
 
 
 def test_empty_is_valid():
-    assert Findings().findings == []
-    assert Findings().keys() == set()
+    assert Findings(findings=[]).findings == []
+    assert Findings(findings=[]).keys() == set()
+
+
+def test_findings_key_required():
+    with pytest.raises(ValidationError):
+        Findings()
+    with pytest.raises(ValidationError):
+        Findings.model_validate({})
+    assert Findings.model_json_schema().get("required") == ["findings"]
 
 
 def test_inputs_keep_unknown_columns():

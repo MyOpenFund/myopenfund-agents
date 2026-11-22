@@ -35,7 +35,7 @@ class Finding(BaseModel):
 class Findings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    findings: list[Finding] = []
+    findings: list[Finding]  # required: a bare {} must never read as a clean night
 
     def keys(self) -> set[tuple[str, str]]:
         return {(f.source_code, f.category.value) for f in self.findings}

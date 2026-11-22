@@ -77,6 +77,14 @@ def test_pydantic_ai_gives_up():
     assert len(calls) == 3  # one request plus max_schema_retries
 
 
+def test_pydantic_ai_bare_object_is_not_a_clean_night():
+    """`{}` must be retried as a schema failure, never read as an empty finding list."""
+    model, calls = scripted({})
+    with pytest.raises(EngineError, match=r"pydantic-ai \(scripted-fn\)"):
+        PydanticAIEngine(model, A1Settings(max_schema_retries=2)).diagnose("night summary")
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize(
     "exc",
     [lambda: ConnectionError("connection refused"), lambda: ConnectionRefusedError(111, "Connection refused")],
@@ -105,7 +113,7 @@ def test_pydantic_ai_sends_wrapped_summary_and_instructions():
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"findings": []})])
 
     result = PydanticAIEngine(FunctionModel(fn), A1Settings(temperature=0.3)).diagnose("S")
-    assert result.findings == Findings()
+    assert result.findings == Findings(findings=[])
     assert seen["instructions"] == A1_INSTRUCTIONS
     assert seen["prompt"] == user_prompt("S")
     assert seen["temperature"] == 0.3

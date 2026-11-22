@@ -118,7 +118,7 @@ def test_cli_run_with_scripted_engine(tmp_path, monkeypatch, capsys, green_histo
     out = capsys.readouterr().out
     assert str(tmp_path / "results") in out and "problems found" in out
     assert cli.main([*args, "--only", "no-such-night"]) == 2
-    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(Findings()))
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(Findings(findings=[])))
     assert cli.main(args) == 1
 
 

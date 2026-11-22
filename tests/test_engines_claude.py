@@ -104,7 +104,7 @@ def test_parse_structured_and_text():
     assert parse_output(envelope(structured_output=GOOD)).keys() == {("se", "unreadable_pdf")}
     text = "Here are the findings:\n```json\n" + json.dumps(GOOD) + "\n```\nDone."
     assert parse_output(envelope(result=text)).keys() == {("se", "unreadable_pdf")}
-    assert parse_output(envelope(result='{"findings": []}')) == Findings()
+    assert parse_output(envelope(result='{"findings": []}')) == Findings(findings=[])
     with pytest.raises(EngineError):
         parse_output(envelope(result="no json at all"))
     with pytest.raises(EngineError):
