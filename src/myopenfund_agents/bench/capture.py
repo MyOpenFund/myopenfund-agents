@@ -32,7 +32,20 @@ class CaptureError(RuntimeError):
 
 
 def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    """Aware UTC; a naive timestamp is read as UTC."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+_TIMESTAMP_FIELDS = ("started_at", "finished_at")
+
+
+def _utc_row(row: Any) -> Any:
+    """Store the row's compared timestamps as aware UTC, so a night never mixes naive and aware values."""
+    for name in _TIMESTAMP_FIELDS:
+        value = getattr(row, name, None)
+        if isinstance(value, datetime):
+            setattr(row, name, _aware(value))
+    return row
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -44,10 +57,14 @@ def _parse_dt(value: Any) -> datetime | None:
         raise CaptureError("unreadable timestamp in MCP response") from exc
 
 
-def _rows(resp: Any, key: str) -> list[dict[str, Any]]:
+def _rows(resp: Any, key: str, *, required: bool = False) -> list[dict[str, Any]]:
     if not isinstance(resp, dict):
         raise CaptureError(f"unexpected MCP response type: {type(resp).__name__}")
-    rows = resp.get(key) or []
+    if required and key not in resp:
+        raise CaptureError(f"unexpected vault_runs_status shape: no {key!r} key")
+    rows = resp.get(key)
+    if rows is None:
+        rows = []
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise CaptureError(f"unexpected shape for {key!r} in MCP response")
     return rows
@@ -55,7 +72,7 @@ def _rows(resp: Any, key: str) -> list[dict[str, Any]]:
 
 def _model(cls: type, row: dict[str, Any]) -> Any:
     try:
-        return cls(**row)
+        return _utc_row(cls(**row))
     except ValidationError as exc:
         raise CaptureError(f"invalid {cls.__name__} row in MCP response") from exc
 
@@ -104,7 +121,7 @@ def capture_night(
 
     tonight: list[SourceRunRow] = []
     history: list[SourceRunRow] = []
-    seen_source_runs: set[tuple[str, str]] = set()
+    seen_source_runs: set[str] = set()  # exact duplicate rows only: no assumption on the row grain
     runs: dict[str, RunRow] = {}
     errors: dict[str, DiscoveryError] = {}
     health: dict[tuple[Any, ...], CadenceRow] = {}
@@ -124,25 +141,25 @@ def capture_night(
             "vault_runs_status",
             {"corpus": corpus, "source_code": code, "since": since.isoformat(), "limit": PAGE},
         )
-        raw_source_runs = _rows(resp, "source_runs")
+        raw_source_runs = _rows(resp, "source_runs", required=True)
         parsed = [_model(SourceRunRow, r) for r in raw_source_runs]
-        if len(raw_source_runs) >= PAGE:
-            finished = [_aware(r.finished_at) for r in parsed if r.finished_at is not None]
-            if not finished or min(finished) > since:
-                raise CaptureError(f"history incomplete for source {code!r}: a full page of {PAGE} rows")
-        for row in parsed:
-            key = (row.run_id, row.source_code)
-            slot = when(_aware(row.finished_at) if row.finished_at is not None else None)
+        if len(raw_source_runs) >= PAGE and not _reaches(parsed, since):
+            raise CaptureError(f"history incomplete for source {code!r}: a full page of {PAGE} rows")
+        for raw, row in zip(raw_source_runs, parsed, strict=True):
+            slot = when(row.finished_at)
+            key = json.dumps(raw, sort_keys=True, default=str)
             if slot is None or key in seen_source_runs:
                 continue
             seen_source_runs.add(key)
             (tonight if slot == "tonight" else history).append(row)
 
-        for raw in _rows(resp, "runs"):  # run grain, not filtered by source: union across calls
-            run = _model(RunRow, raw)
-            if run.run_id in runs:
-                continue
-            if when(_aware(run.finished_at) if run.finished_at is not None else None) == "tonight":
+        raw_runs = _rows(resp, "runs")  # run grain, not filtered by source: union across calls
+        parsed_runs = [_model(RunRow, r) for r in raw_runs]
+        # A full page must provably cover tonight, else tonight's runs may be cut (a false "no run tonight").
+        if len(raw_runs) >= PAGE and not _reaches(parsed_runs, night_start):
+            raise CaptureError(f"runs page full for source {code!r}: {PAGE} rows do not cover the whole night")
+        for run in parsed_runs:
+            if run.run_id not in runs and when(run.finished_at) == "tonight":
                 runs[run.run_id] = run
 
         for raw in _rows(resp, "open_discovery_errors"):
@@ -166,7 +183,7 @@ def capture_night(
         source_runs=tonight,
         history=history,
         discovery_errors=list(errors.values()),
-        cadence=list(health.values()) if now - night_end < FRESH_CADENCE else None,
+        cadence=list(health.values()) if timedelta(0) <= now - night_end < FRESH_CADENCE else None,
         open_issues=[],
     )
     deny = deny or DenyList()
@@ -174,6 +191,12 @@ def capture_night(
     if found:
         raise CaptureError("infra details found: " + "; ".join(_redact_paths(found, deny)))
     return inputs
+
+
+def _reaches(rows: list[Any], bound: datetime) -> bool:
+    """True when finished rows exist and the oldest finished_at is at or before ``bound``."""
+    finished = [r.finished_at for r in rows if r.finished_at is not None]
+    return bool(finished) and min(finished) <= bound
 
 
 def _redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
@@ -187,10 +210,10 @@ def _redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
 
 def _unwrap_result(result: Any) -> Any:
     """Payload of an MCP CallToolResult: structured content (lone 'result' key unwrapped), else JSON text."""
-    if getattr(result, "is_error", False):
+    if result.is_error:
         text = _first_text(result) or "tool error"
         raise CaptureError(f"MCP tool error: {text[:_ERROR_TEXT_MAX]}")
-    structured = getattr(result, "structured_content", None)
+    structured = result.structured_content
     if structured is not None:
         if isinstance(structured, dict) and set(structured) == {"result"}:
             return structured["result"]
@@ -205,10 +228,19 @@ def _unwrap_result(result: Any) -> Any:
 
 
 def _first_text(result: Any) -> str | None:
-    for item in getattr(result, "content", None) or []:
+    for item in result.content or []:
         if getattr(item, "type", None) == "text":
             return item.text
     return None
+
+
+def _transport_failure(exc: BaseException) -> bool:
+    """A connection or transport failure (httpx, OSError), possibly inside an ExceptionGroup."""
+    import httpx2
+
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_transport_failure(e) for e in exc.exceptions)
+    return isinstance(exc, (httpx2.HTTPError, OSError))
 
 
 def mcp_caller(url: str, token: str) -> CallTool:  # pragma: no cover - network; exercised in Task 14
@@ -228,6 +260,14 @@ def mcp_caller(url: str, token: str) -> CallTool:  # pragma: no cover - network;
         return _unwrap_result(result)
 
     def call(name: str, args: dict) -> Any:
-        return asyncio.run(_call(name, args))
+        try:
+            return asyncio.run(_call(name, args))
+        except CaptureError:
+            raise
+        except Exception as exc:
+            if _transport_failure(exc):
+                # Type name only: never the request, its headers or the token.
+                raise CaptureError(f"MCP connection failed: {type(exc).__name__}") from None
+            raise
 
     return call

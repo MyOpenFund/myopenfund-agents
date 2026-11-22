@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx2
 import pytest
 from mcp.types import CallToolResult, TextContent
 
@@ -10,6 +11,7 @@ from conftest import END, START
 from myopenfund_agents.bench.capture import (
     PAGE,
     CaptureError,
+    _transport_failure,
     _unwrap_result,
     capture_night,
     source_codes,
@@ -228,3 +230,100 @@ def test_naive_night_end_treated_as_utc():
     )  # fmt: skip
     assert inputs.night_end == END
     assert len(inputs.source_runs) == 1
+
+
+# --- Fix round 1 -------------------------------------------------------------------------------
+
+SINCE = START - timedelta(days=14)
+
+
+def test_full_runs_page_not_covering_tonight_refused():
+    runs = [_run(f"r{i}", END - timedelta(minutes=i)) for i in range(PAGE)]  # all inside tonight
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[_sr("aa", TONIGHT)], runs=runs)})
+    with pytest.raises(CaptureError, match="runs page full"):
+        _capture(call, sources=["aa"])
+
+
+def test_full_runs_page_of_unfinished_rows_refused():
+    runs = [_run(f"r{i}", None) for i in range(PAGE)]
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[_sr("aa", TONIGHT)], runs=runs)})
+    with pytest.raises(CaptureError, match="runs page full"):
+        _capture(call, sources=["aa"])
+
+
+def test_full_runs_page_reaching_before_tonight_accepted():
+    runs = [_run(f"r{i}", END - timedelta(hours=1, minutes=i)) for i in range(PAGE - 1)]
+    runs.append(_run("r-old", START))
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[_sr("aa", TONIGHT)], runs=runs)})
+    inputs = _capture(call, sources=["aa"])
+    assert len(inputs.runs) == PAGE - 1
+
+
+def test_missing_source_runs_key_refused():
+    call = FakeCall({("vault_runs_status", "aa"): {"result": _resp(source_runs=[_sr("aa", TONIGHT)])}})
+    with pytest.raises(CaptureError, match="unexpected vault_runs_status shape"):
+        _capture(call, sources=["aa"])
+
+
+def test_null_source_runs_accepted():
+    call = FakeCall({("vault_runs_status", "aa"): {"source_runs": None}})
+    inputs = _capture(call, sources=["aa"])
+    assert inputs.source_runs == [] and inputs.history == []
+
+
+def test_malformed_row_refused():
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=["not a row"])})
+    with pytest.raises(CaptureError, match="unexpected shape"):
+        _capture(call, sources=["aa"])
+
+
+def test_source_runs_dedup_only_exact_duplicates():
+    a = _sr("aa", TONIGHT, run_id="r1", doc_type="report")
+    b = _sr("aa", TONIGHT, run_id="r1", doc_type="notice")  # same run and source, other grain
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[a, b, dict(a)])})
+    inputs = _capture(call, sources=["aa"])
+    assert [r.doc_type for r in inputs.source_runs] == ["report", "notice"]
+
+
+def test_full_page_oldest_equal_to_since_accepted():
+    rows = [_sr("aa", END - timedelta(minutes=10 * i), run_id=f"r{i}") for i in range(PAGE - 1)]
+    rows.append(_sr("aa", SINCE, run_id="r-since"))
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=rows)})
+    inputs = _capture(call, sources=["aa"])
+    assert any(r.run_id == "r-since" for r in inputs.history)
+
+
+def test_full_page_of_unfinished_source_runs_refused():
+    rows = [_sr("aa", None, run_id=f"r{i}") for i in range(PAGE)]
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=rows)})
+    with pytest.raises(CaptureError, match="history incomplete"):
+        _capture(call, sources=["aa"])
+
+
+def test_timestamps_stored_as_aware_utc():
+    naive = _sr("aa", None, finished_at=TONIGHT.replace(tzinfo=None).isoformat(),
+                started_at=(TONIGHT - timedelta(minutes=5)).replace(tzinfo=None).isoformat())  # fmt: skip
+    offset = _sr("aa", None, run_id="r-off", finished_at="2026-11-22T02:00:00+01:00")
+    run = _run("r-naive", None)
+    run["finished_at"] = TONIGHT.replace(tzinfo=None).isoformat()
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[naive, offset], runs=[run])})
+    inputs = _capture(call, sources=["aa"])
+    stamps = [r.finished_at for r in inputs.source_runs] + [inputs.source_runs[0].started_at]
+    stamps += [r.finished_at for r in inputs.runs]
+    assert all(s is not None and s.tzinfo is UTC for s in stamps)
+    assert inputs.source_runs[1].finished_at == datetime(2026, 11, 22, 1, 0, tzinfo=UTC)
+
+
+def test_cadence_refused_when_now_before_night_end():
+    health = [{"source_code": "aa", "days_late": 1.0}]
+    call = FakeCall({("vault_runs_status", "aa"): _resp(source_runs=[_sr("aa", TONIGHT)], health=health)})
+    assert _capture(call, sources=["aa"], now=END - timedelta(hours=1)).cadence is None
+    assert _capture(call, sources=["aa"], now=END).cadence is not None
+
+
+def test_transport_failure_detection():
+    assert _transport_failure(httpx2.ConnectError("refused"))
+    assert _transport_failure(OSError("unreachable"))
+    assert _transport_failure(ExceptionGroup("tg", [ValueError("x"), httpx2.ReadTimeout("slow")]))
+    assert not _transport_failure(ExceptionGroup("tg", [ValueError("x")]))
+    assert not _transport_failure(ValueError("x"))
