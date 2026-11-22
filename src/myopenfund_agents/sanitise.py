@@ -30,9 +30,7 @@ _CRED_KEYS = (
     "password", "passwd", "pwd", "secret", "token", "api_key", "apikey", "api-key",
     "access_token", "auth_token", "secret_key", "client_secret",
 )  # fmt: skip
-_USERINFO_RE = re.compile(
-    r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://(?:[^/\s@:]{0,256}:[^\s@]{1,512}|[A-Za-z0-9_-]{8,128})@", re.I
-)
+_USERINFO_RE = re.compile(r"[a-z][a-z0-9+.-]{0,30}://(?:[^/\s@:]{0,256}:[^\s@]{1,512}|[A-Za-z0-9_-]{8,128})@", re.I)
 _BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
 _GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
 _SIGNED_RE = re.compile(r"(?:x-amz-signature|signature|sig|token)=[^\s&\"']{8,}", re.I)
@@ -85,13 +83,13 @@ def _v6_run_private(run: str) -> bool:
     colons = [i for i, c in enumerate(run) if c == ":"]
     if len(colons) < 2:
         return False
-    ks = range(2, 8) if "::" in run else ((7, 6) if "." in run else (7,))
+    ks = range(2, 9) if "::" in run else ((6, 7) if "." in run else (7,))
     starts = [0] + [i + 1 for i, c in enumerate(run) if c in ":."]
     for s in starts:
         j = bisect_left(colons, s)
         for k in ks:
             if j + k - 1 >= len(colons):
-                continue
+                break
             ck = colons[j + k - 1]
             if ck - s >= _V6_MAX_LEN:
                 break
@@ -118,7 +116,7 @@ def _path_hit(root: str, text: str) -> bool:
     bare = root.rstrip("/")
     if not bare:
         return root in text
-    return re.search(re.escape(bare) + r"(?:(?![\w.-])|(?=\.(?:\s|\Z)))", text) is not None
+    return re.search(re.escape(bare) + r"(?:(?![\w.-])|(?=\.+(?![\w-])))", text) is not None
 
 
 def violations(text: str, deny: DenyList) -> list[str]:
@@ -150,6 +148,23 @@ def _as_text(x: Any) -> str:
     return str(x)
 
 
+def _key_leaves(k: Any) -> list[str] | None:
+    """Text leaves of a dict key, or None when the key contains an unsupported type."""
+    if isinstance(k, (str, bytes, bytearray)):
+        return [_as_text(k)]
+    if k is None or isinstance(k, (bool, int, float)):
+        return []
+    if isinstance(k, (tuple, frozenset)):
+        leaves: list[str] = []
+        for x in k:
+            sub = _key_leaves(x)
+            if sub is None:
+                return None
+            leaves += sub
+        return leaves
+    return None
+
+
 def _is_cred_key(key: str) -> bool:
     k = key.lower()
     return any(k == w or k.endswith(("_" + w, "-" + w)) for w in _CRED_KEYS)
@@ -171,7 +186,7 @@ def check_tree(obj: Any, deny: DenyList, where: str = "$", _cred: bool = False) 
     if obj is None or isinstance(obj, bool):
         return out
     if isinstance(obj, (int, float)):
-        if _cred and len(str(obj)) >= 6:
+        if _cred and (isinstance(obj, float) or obj.bit_length() > 64 or abs(obj) >= 100_000):
             out.append(f"{where}: credential")
         return out
     if isinstance(obj, (str, bytes, bytearray)):
@@ -185,10 +200,16 @@ def check_tree(obj: Any, deny: DenyList, where: str = "$", _cred: bool = False) 
             out.append(f"{where}: credential")
         if isinstance(obj, dict):
             for k, v in obj.items():
-                ks = _as_text(k)
-                child = f"{where}.{ks}"
-                out += [f"{child}: {r}" for r in violations(ks, deny)]
-                out += check_tree(v, deny, child, _cred=_cred or _is_cred_key(ks))
+                leaves = _key_leaves(k)
+                if leaves is None:
+                    child = f"{where}.<{type(k).__name__}>"
+                    out.append(f"{child}: unsupported_type")
+                    out += check_tree(v, deny, child, _cred=_cred)
+                    continue
+                child = f"{where}.{k if isinstance(k, str) else _as_text(k)}"
+                for leaf in leaves:
+                    out += [f"{child}: {r}" for r in violations(leaf, deny)]
+                out += check_tree(v, deny, child, _cred=_cred or any(_is_cred_key(x) for x in leaves))
         else:
             for i, v in enumerate(obj):
                 out += check_tree(v, deny, f"{where}[{i}]", _cred=_cred)

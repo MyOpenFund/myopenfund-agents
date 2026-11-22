@@ -235,3 +235,44 @@ def test_round2_path_root_boundaries(text):
 def test_round2_path_root_lookalikes_pass():
     deny = DenyList(path_roots=["/srv/private/"])
     assert violations("/srv/privateer /srv/private.bak /srv/private-x", deny) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fd00:1:2:3:4:5:6::",
+        "fe80:1:2:3:4:5:6::",
+        "fd00:0:0:0:0:0:1.2.3.4.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0:1",
+        "a" * 40 + ".https://u:pw@h",
+        "1https://u:pw@h",
+    ],
+)
+def test_round3_bypasses_refused(text):
+    assert violations(text, DenyList()) != []
+
+
+@pytest.mark.parametrize("text", ["(see /srv/private.)", '"/srv/private."', "/srv/private.,", "/srv/private..."])
+def test_round3_path_trailing_dot(text):
+    assert violations(text, DenyList(path_roots=["/srv/private/"])) == ["deny_path"]
+    assert violations("/srv/private.bak", DenyList(path_roots=["/srv/private/"])) == []
+
+
+def test_round3_huge_int_under_credential_key():
+    assert check_tree({"password": 10**5000}, DenyList()) == ["$.password: credential"]
+    assert check_tree({"token": 12}, DenyList()) == []
+
+
+def test_round3_unsupported_key_types():
+    import enum
+
+    class Color(enum.Enum):
+        RED = 1
+
+    def gen():
+        yield 1
+
+    for key in (Color.RED, object(), (Color.RED, 1), gen()):
+        out = check_tree({key: 1}, DenyList())
+        assert len(out) == 1 and out[0].endswith(": unsupported_type")
+    assert check_tree({1: "a", None: "b", 1.5: "d", b"k": "e"}, DenyList()) == []
+    assert check_tree({(b"100.64.1.2", 1): 1}, DenyList()) == ["$.(b'100.64.1.2', 1): private_ip"]
