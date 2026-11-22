@@ -27,13 +27,20 @@ _OPTIONAL = ("max_seconds_per_night",)
 
 @dataclass
 class Attempt:
-    """One engine run on a night. `keys is None` means no valid output."""
+    """One engine run on a night. `keys is None` means no valid output.
+
+    `findings` are the engine's findings as dumped JSON, before the deterministic grouping (kept so the
+    diagnoses can be graded later); tokens are None when the engine does not report them.
+    """
 
     keys: Keys | None
     actions: list[ActionTriple] | None
     seconds: float
     retries: int = 0
     error: str | None = None
+    findings: list[dict[str, Any]] | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @dataclass

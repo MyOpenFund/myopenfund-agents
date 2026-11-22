@@ -288,3 +288,67 @@ def test_cli_capture_error_exits_1(tmp_path, monkeypatch, capsys):
     assert cli.main(_capture_args(tmp_path)) == 1
     assert "history incomplete" in capsys.readouterr().err
     assert not (tmp_path / "2026-11-22").exists()
+
+
+# --- Final review fix wave ---
+
+
+class _TokenEngine:
+    """Returns fixed findings with token counts, like a real adapter."""
+
+    name = "tokens"
+    model = "scripted"
+
+    def __init__(self, findings: Findings) -> None:
+        self.findings = findings
+
+    def diagnose(self, summary_text: str):
+        from myopenfund_agents.engines.base import EngineResult
+
+        return EngineResult(self.findings, self.name, self.model, 0.5, 1, input_tokens=1200, output_tokens=80)
+
+
+def test_attempt_keeps_findings_and_tokens(green_history):
+    score = run_night(_known_problem_night(green_history), _TokenEngine(_se_unreadable()), A1Settings(), 1, None)
+    (attempt,) = score.attempts
+    assert attempt.input_tokens == 1200 and attempt.output_tokens == 80
+    assert attempt.findings == [_se_unreadable().model_dump(mode="json")["findings"][0]]
+    assert attempt.findings[0]["diagnosis"] == "Text layer empty."
+
+
+def test_failed_attempt_has_no_findings_or_tokens(green_history):
+    score = run_night(_known_problem_night(green_history), _BrokenEngine(), A1Settings(), 1, None)
+    (attempt,) = score.attempts
+    assert attempt.findings is None and attempt.input_tokens is None and attempt.output_tokens is None
+
+
+def test_report_json_carries_findings_and_tokens(tmp_path, green_history):
+    engine = _TokenEngine(_se_unreadable())
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
+                                 load_thresholds(THRESHOLDS, "local"))  # fmt: skip
+    md = write_report(tmp_path, engine, "local", scores, verdicts)
+    attempt = json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))["nights"][0]["attempts"][0]
+    assert attempt["input_tokens"] == 1200 and attempt["output_tokens"] == 80
+    assert attempt["findings"][0]["title"] == "se: unreadable PDFs"
+    assert attempt["findings"][0]["evidence"] == ["bad_content=2"]
+
+
+def test_report_withholds_finding_texts_with_infra_detail(tmp_path, green_history):
+    from myopenfund_agents.sanitise import DenyList
+
+    finding = Finding(
+        source_code="se", category=Category.UNREADABLE_PDF, severity=Severity.WARN,
+        title="se: mirror.example.org unreachable", diagnosis="Fetch from 100.64.1.2 failed. password=abcdef123456",
+        evidence=["bad_content=2", "GET http://100.64.1.2/x"],
+    )  # fmt: skip
+    engine = _TokenEngine(Findings(findings=[finding]))
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
+                                 load_thresholds(THRESHOLDS, "local"))  # fmt: skip
+    md = write_report(tmp_path, engine, "local", scores, verdicts, deny=DenyList(hosts=["mirror.example.org"]))
+    text = md.with_suffix(".json").read_text(encoding="utf-8")
+    assert "100.64.1.2" not in text and "mirror.example.org" not in text and "abcdef123456" not in text
+    got = json.loads(text)["nights"][0]["attempts"][0]["findings"][0]
+    assert got["title"] == "withheld (deny_host)"
+    assert got["diagnosis"] == "withheld (credential, private_ip)"
+    assert got["evidence"] == ["bad_content=2", "withheld (private_ip)"]
+    assert got["source_code"] == "se"
