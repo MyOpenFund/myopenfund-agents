@@ -85,6 +85,7 @@ def test_verdicts_prod_and_local():
         "problems found",
         "false alarms on green nights",
         "actions as expected",
+        "general outage grouped",
         "valid output",
         "repeat agreement (worst night)",
         "slowest night (s)",
@@ -113,14 +114,57 @@ def test_recall_green_alarms_and_empty():
 
 
 def test_load_thresholds_strict(tmp_path):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown threshold profile"):
         load_thresholds(THRESHOLDS, "nope")
     p = tmp_path / "t.toml"
-    p.write_text("[x]\nmin_recall=1\nmin_recal=1\nmax_false_alarms=0\nmin_actions_ok=1\nmin_valid=1\nmin_agreement=1\n")
-    with pytest.raises(ValueError):
+    p.write_text(
+        "[x]\nmin_recall=1\nmin_recal=1\nmax_false_alarms=0\nmin_actions_ok=1\nmin_valid=1\nmin_agreement=1\nmin_grouping=1\n"
+    )
+    with pytest.raises(ValueError, match="unknown keys"):
         load_thresholds(p, "x")
     p.write_text("[x]\nmin_recall=1\n")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="missing keys"):
+        load_thresholds(p, "x")
+    p.write_text(
+        "[x]\nmin_recall=true\nmax_false_alarms=0\nmin_actions_ok=1\nmin_valid=1\nmin_agreement=1\nmin_grouping=1\n"
+    )
+    with pytest.raises(ValueError, match="must be a number"):
+        load_thresholds(p, "x")
+    p.write_text(
+        '[x]\nmin_recall="1"\nmax_false_alarms=0\nmin_actions_ok=1\nmin_valid=1\nmin_agreement=1\nmin_grouping=1\n'
+    )
+    with pytest.raises(ValueError, match="must be a number"):
         load_thresholds(p, "x")
     assert load_thresholds(THRESHOLDS, "local")["max_seconds_per_night"] == 600
     assert "max_seconds_per_night" not in load_thresholds(THRESHOLDS, "prod")
+
+
+def test_false_alarm_on_no_finding_trap():
+    n = make_night("trap", keys=(), actions=())
+    s = score(n, ok(keys=(("new", "unknown"),), actions=()))
+    assert s.false_alarms == 1
+    v = by_name(verdicts([s], load_thresholds(THRESHOLDS, "prod")))
+    assert not v["false alarms on green nights"].passed
+
+
+OUTAGE = ("*", "general_outage")
+OUT_ACT = ("summary_issue", "*", "general_outage")
+
+
+def test_general_outage_grouping():
+    t = load_thresholds(THRESHOLDS, "prod")
+    n = make_night("trap", keys=(OUTAGE,), actions=(OUT_ACT,))
+    exact = score(n, ok(keys=(OUTAGE,), actions=(OUT_ACT,)))
+    v = by_name(verdicts([exact], t))
+    assert v["general outage grouped"].value == 1.0 and v["general outage grouped"].passed
+    over = score(n, ok(keys=(OUTAGE, KEY), actions=(OUT_ACT,)))
+    v = by_name(verdicts([over], t))
+    assert v["general outage grouped"].value == 0.0 and not v["general outage grouped"].passed
+    invalid = score(n, bad())
+    assert by_name(verdicts([invalid], t))["general outage grouped"].value == 0.0
+    assert by_name(verdicts([], t))["general outage grouped"].value == 1.0
+
+
+def test_empty_attempts_rejected():
+    with pytest.raises(ValueError, match="no attempts"):
+        score(make_night())

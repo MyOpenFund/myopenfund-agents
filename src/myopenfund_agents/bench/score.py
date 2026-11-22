@@ -11,7 +11,8 @@ from myopenfund_agents.bench.fixtures import Night
 Keys = set[tuple[str, str]]
 ActionTriple = tuple[str, str, str]
 
-_REQUIRED = ("min_recall", "max_false_alarms", "min_actions_ok", "min_valid", "min_agreement")
+OUTAGE = ("*", "general_outage")
+_REQUIRED = ("min_recall", "max_false_alarms", "min_actions_ok", "min_valid", "min_agreement", "min_grouping")
 _OPTIONAL = ("max_seconds_per_night",)
 
 
@@ -50,9 +51,11 @@ class Verdict:
 
 
 def score_night(night: Night, attempts: list[Attempt]) -> NightScore:
+    if not attempts:
+        raise ValueError(f"night {night.inputs.night_id!r}: no attempts to score")
     expected = night.expected.keys()
-    first = attempts[0] if attempts else None
-    first_keys = first.keys if first is not None else None
+    first = attempts[0]
+    first_keys = first.keys
     if first_keys is None:
         found: list[tuple[str, str]] = []
         extra: list[tuple[str, str]] = []
@@ -61,18 +64,18 @@ def score_night(night: Night, attempts: list[Attempt]) -> NightScore:
         extra = sorted(first_keys - expected)
     origin = night.meta.origin
     actions_ok: bool | None = None
-    if first is not None and first_keys is not None and first_keys == expected:
+    if first_keys is not None and first_keys == expected:
         want = sorted((a.kind, a.source_code, a.category.value) for a in night.expected.actions)
         actions_ok = sorted(first.actions or []) == want
     outcomes = Counter(None if a.keys is None else frozenset(a.keys) for a in attempts)
-    agreement = max(outcomes.values()) / len(attempts) if attempts else 0.0
+    agreement = max(outcomes.values()) / len(attempts)
     return NightScore(
         night_id=night.inputs.night_id,
         origin=origin,
         expected=sorted(expected),
         found=found,
         extra=extra,
-        false_alarms=len(extra) if origin == "green" else 0,
+        false_alarms=len(extra) if not expected else 0,
         actions_ok=actions_ok,
         valid=all(a.keys is not None for a in attempts),
         agreement=agreement,
@@ -90,6 +93,9 @@ def load_thresholds(path: Path, profile: str) -> dict[str, Any]:
     missing = sorted(set(_REQUIRED) - set(t))
     if unknown or missing:
         raise ValueError(f"profile {profile!r}: unknown keys {unknown}, missing keys {missing}")
+    for k, v in t.items():
+        if isinstance(v, bool) or not isinstance(v, int | float):
+            raise ValueError(f"profile {profile!r}: {k} must be a number, got {v!r}")
     return dict(t)
 
 
@@ -100,12 +106,17 @@ def verdicts(scores: list[NightScore], t: dict[str, Any]) -> list[Verdict]:
     alarms = sum(s.false_alarms for s in scores)
     judged = [s for s in scores if s.actions_ok is not None]
     actions = sum(1 for s in judged if s.actions_ok) / len(judged) if judged else 1.0
+    outage = [s for s in scores if OUTAGE in s.expected]
+    # an invalid first attempt has found == [] and so never equals a non-empty expected set
+    exact = sum(1 for s in outage if s.found == s.expected and not s.extra)
+    grouped = exact / len(outage) if outage else 1.0
     valid = sum(1 for s in scores if s.valid) / len(scores) if scores else 1.0
     agreement = min((s.agreement for s in scores), default=1.0)
     out = [
         Verdict("problems found", recall, t["min_recall"], recall >= t["min_recall"]),
         Verdict("false alarms on green nights", alarms, t["max_false_alarms"], alarms <= t["max_false_alarms"]),
         Verdict("actions as expected", actions, t["min_actions_ok"], actions >= t["min_actions_ok"]),
+        Verdict("general outage grouped", grouped, t["min_grouping"], grouped >= t["min_grouping"]),
         Verdict("valid output", valid, t["min_valid"], valid >= t["min_valid"]),
         Verdict("repeat agreement (worst night)", agreement, t["min_agreement"], agreement >= t["min_agreement"]),
     ]
