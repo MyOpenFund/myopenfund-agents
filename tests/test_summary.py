@@ -253,3 +253,31 @@ def test_failed_commands_cut_in_blocks():
     summary = build_summary(night([row]), SETTINGS)
     assert "z" * 300 not in summary.text
     assert "…" in summary.text
+
+
+def test_naive_timestamps_read_as_utc():
+    """A hand-edited fixture without offsets must summarise, not raise TypeError on mixed datetimes."""
+    from datetime import UTC
+
+    from myopenfund_agents.core.inputs import NightInputs
+
+    row = {"run_id": "r", "tool": "harvester", "command": "harvest se", "source_code": "se", "docs_seen": 10,
+           "outcome": "ok", "exit_code": 0}  # fmt: skip
+    run = {"run_id": "r", "tool": "harvester", "command": "harvest", "outcome": "ok", "exit_code": 0}
+    inputs = NightInputs.model_validate(
+        {
+            "night_id": "2026-11-22",
+            "night_start": "2026-11-21T06:00:00",
+            "night_end": "2026-11-22T06:00:00+00:00",
+            "runs": [{**run, "finished_at": "2026-11-22T01:00:00"}],
+            "source_runs": [{**row, "finished_at": "2026-11-22T01:00:00", "started_at": "2026-11-22T00:50:00"}],
+            "history": [{**row, "run_id": f"h{n}", "finished_at": f"2026-11-{20 - n:02d}T01:00:00"} for n in range(6)],
+            "discovery_errors": [],
+            "open_issues": [],
+        }
+    )
+    assert inputs.night_start.tzinfo is UTC
+    assert inputs.source_runs[0].finished_at.tzinfo is UTC and inputs.source_runs[0].started_at.tzinfo is UTC
+    assert inputs.history[0].finished_at.tzinfo is UTC and inputs.runs[0].finished_at.tzinfo is UTC
+    summary = build_summary(inputs, A1Settings())
+    assert "Runs: 1 finished, 0 failing" in summary.text

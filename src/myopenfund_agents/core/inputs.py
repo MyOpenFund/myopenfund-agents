@@ -1,9 +1,17 @@
 """Night inputs: typed rows read from the vault MCP. New vault columns never break A1."""
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, field_validator
+
+
+def _naive_as_utc(dt: datetime) -> datetime:
+    """A timestamp without offset (e.g. in a hand-edited fixture) is read as UTC; aware values are kept."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+UtcDatetime = Annotated[datetime, AfterValidator(_naive_as_utc)]
 
 
 class _Row(BaseModel):
@@ -15,8 +23,8 @@ class RunRow(_Row):
     tool: str
     command: str
     corpus: str | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
     outcome: str | None = None
     exit_code: int | None = None
     totals: dict[str, Any] | None = None
@@ -28,8 +36,8 @@ class SourceRunRow(_Row):
     command: str
     corpus: str | None = None
     source_code: str
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
     outcome: str | None = None
     exit_code: int | None = None
     docs_seen: int | None = None
@@ -73,8 +81,8 @@ class OpenIssue(BaseModel):
 
 class NightInputs(BaseModel):
     night_id: str
-    night_start: datetime
-    night_end: datetime
+    night_start: UtcDatetime
+    night_end: UtcDatetime
     runs: list[RunRow]
     source_runs: list[SourceRunRow]
     history: list[SourceRunRow]
