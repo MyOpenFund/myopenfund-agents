@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from myopenfund_agents.core.findings import Category
 from myopenfund_agents.core.inputs import NightInputs
 
 
@@ -15,13 +16,13 @@ class _Model(BaseModel):
 
 class Key(_Model):
     source_code: str
-    category: str
+    category: Category
 
 
 class ExpectedAction(_Model):
     kind: Literal["new_issue", "comment", "summary_issue"]
     source_code: str
-    category: str
+    category: Category
 
 
 class Expected(_Model):
@@ -29,7 +30,7 @@ class Expected(_Model):
     actions: list[ExpectedAction] = []
 
     def keys(self) -> set[tuple[str, str]]:
-        return {(k.source_code, k.category) for k in self.findings}
+        return {(k.source_code, k.category.value) for k in self.findings}
 
 
 class Meta(_Model):
@@ -51,7 +52,10 @@ _PARTS = ("inputs", "expected", "meta")
 
 
 def save(night: Night, root: Path) -> Path:
-    d = root / night.inputs.night_id
+    night_id = night.inputs.night_id
+    if not night_id or "/" in night_id or "\\" in night_id or night_id in (".", ".."):
+        raise ValueError(f"unsafe night_id {night_id!r}")
+    d = root / night_id
     d.mkdir(parents=True, exist_ok=True)
     dumped = night.model_dump(mode="json")
     for part in _PARTS:

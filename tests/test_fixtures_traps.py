@@ -1,8 +1,10 @@
 import pytest
+from pydantic import ValidationError
 
 from conftest import night, src_run
 from myopenfund_agents.bench import traps
-from myopenfund_agents.bench.fixtures import Expected, Key, Meta, Night, load, load_all, save
+from myopenfund_agents.bench.fixtures import Expected, ExpectedAction, Key, Meta, Night, load, load_all, save
+from myopenfund_agents.core.inputs import OpenIssue, RunRow
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.settings import A1Settings
 
@@ -10,6 +12,14 @@ from myopenfund_agents.settings import A1Settings
 def _base(green_history):
     rows = [src_run("us", seen=150), src_run("fr"), src_run("se")]
     return night(source_runs=rows, history=green_history)
+
+
+def _wide_base():
+    rows = [src_run(c) for c in ("a1", "b2", "c3", "d4", "e5", "f6")]
+    return night(
+        source_runs=rows,
+        runs=[RunRow(run_id="run-a1-n0", tool="harvester", command="harvest", outcome="ok", exit_code=0)],
+    )
 
 
 def _summary(inputs):
@@ -44,12 +54,16 @@ def test_traps_show_in_summary(green_history):
     t = traps.bad_content(base, "fr")
     assert _summary(t.inputs).unusual["fr"].flags == ["failed_run", "bad_content"]
     assert t.expected.keys() == {("fr", "unreadable_pdf")}
+    assert [(a.kind, a.source_code, a.category) for a in t.expected.actions] == [("new_issue", "fr", "unreadable_pdf")]
 
-    t = traps.general_outage(base)
+    t = traps.general_outage(_wide_base())
     unusual = _summary(t.inputs).unusual
-    assert set(unusual) == {"us", "fr", "se"}
+    assert len(unusual) == 6
     assert all("failed_run" in s.flags for s in unusual.values())
     assert t.expected.keys() == {("*", "general_outage")}
+    assert [(a.kind, a.source_code, a.category) for a in t.expected.actions] == [("new_issue", "*", "general_outage")]
+    assert all(r.outcome == "failed" and r.docs_new == 0 and r.fetch_errors >= 1 for r in t.inputs.source_runs)
+    assert all(r.outcome == "failed" and r.exit_code == 1 for r in t.inputs.runs)
     assert t.meta.notes
 
     t = traps.new_source(base)
@@ -67,9 +81,71 @@ def test_traps_show_in_summary(green_history):
 
 def test_trap_errors(green_history):
     base = _base(green_history)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="xx"):
         traps.volume_drop(base, "xx")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="already"):
         traps.new_source(base, "us")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no source run"):
         traps.new_source(night())
+    with pytest.raises(ValueError, match="general_outage_min_sources"):
+        traps.general_outage(base)
+    with pytest.raises(ValueError, match="xx"):
+        traps.bad_content(base, "xx")
+
+
+def test_volume_drop_guarantee(green_history):
+    base = _base(green_history)
+    with pytest.raises(ValueError, match="volume_drop"):
+        traps.volume_drop(base, "fr")  # median 10 * 0.2 = 2, seen 3 is not a drop
+    with pytest.raises(ValueError, match="volume_drop"):
+        traps.volume_drop(night(source_runs=[src_run("us", seen=150)], history=green_history[:6]), "us")
+    t = traps.volume_drop(base, "fr", seen=1)
+    assert _summary(t.inputs).unusual["fr"].flags == ["volume_drop"]
+
+
+def test_volume_drop_multiple_rows_sums_to_seen(green_history):
+    rows = [src_run("us", seen=100, run_id="r1"), src_run("us", seen=50, run_id="r2")]
+    t = traps.volume_drop(night(source_runs=rows, history=green_history), "us", seen=3)
+    assert [r.docs_seen for r in t.inputs.source_runs] == [3, 0]
+
+
+def test_closed_categories():
+    with pytest.raises(ValidationError):
+        Key(source_code="us", category="unreadable-pdf")
+    with pytest.raises(ValidationError):
+        ExpectedAction(kind="comment", source_code="us", category="nope")
+
+
+def test_known_problem_details(green_history):
+    base = _base(green_history)
+    t = traps.known_problem(base, "se", "org/repo", count=4)
+    assert t.inputs.source_runs[2].bad_content == 4
+    again = base.model_copy(deep=True)
+    again.open_issues.append(OpenIssue(fingerprint="a1:org/repo:se:unreadable_pdf", number=7, repo="org/repo"))
+    t = traps.known_problem(again, "se", "org/repo")
+    assert len(t.inputs.open_issues) == 1 and t.inputs.open_issues[0].number == 7
+
+
+def test_new_source_keeps_extra_columns(green_history):
+    row = src_run("us", seen=150, extra_col="keep")
+    t = traps.new_source(night(source_runs=[row], history=green_history))
+    assert t.inputs.source_runs[1].model_extra["extra_col"] == "keep"
+
+
+def test_save_rejects_unsafe_night_id(tmp_path, green_history):
+    n = traps.new_source(_base(green_history))
+    for bad in ("a/b", "a\\b", ".", ".."):
+        n.inputs.night_id = bad
+        with pytest.raises(ValueError, match="night_id"):
+            save(n, tmp_path)
+
+
+def test_trap_roundtrip_and_load_all(tmp_path, green_history):
+    base = _base(green_history)
+    t1 = traps.volume_drop(base, "us")
+    t2 = traps.bad_content(base, "fr")
+    save(t2, tmp_path)
+    save(t1, tmp_path)
+    (tmp_path / "empty-dir").mkdir()
+    assert load(tmp_path / t1.inputs.night_id) == t1
+    assert [n.inputs.night_id for n in load_all(tmp_path)] == sorted([t1.inputs.night_id, t2.inputs.night_id])
