@@ -147,7 +147,7 @@ def test_check_tree_unknown_types_fail_closed():
     assert check_tree(frozenset({"100.64.1.2"}), deny) == ["$[0]: private_ip"]
     assert check_tree(("a", "100.64.1.2"), deny) == ["$[1]: private_ip"]
     assert check_tree(D("100.64.1.2"), deny) == ["$.x: private_ip"]
-    assert check_tree(RuntimeError("connect 100.64.1.2"), deny) == ["$: private_ip"]
+    assert check_tree(RuntimeError("connect 100.64.1.2"), deny) == ["$: unsupported_type"]
     assert check_tree({("100.64.1.2", 1): 1}, deny) == ["$.('100.64.1.2', 1): private_ip"]
     assert check_tree([None, True, 3, 1.5], deny) == []
 
@@ -157,3 +157,81 @@ def test_check_tree_credential_keys():
     assert check_tree({"api_key": "abcdef123", "n": "ok"}, DenyList()) == ["$.api_key: credential"]
     assert check_tree({"password": "abc"}, DenyList()) == []
     assert check_tree({"password": "password=hunter22"}, DenyList()) == ["$.password: credential"]
+
+
+def test_linear_time_on_adversarial_input():
+    import time
+
+    t = time.monotonic()
+    assert violations("ab" * 100_000, DenyList()) == []
+    assert violations("1:" * 100_000, DenyList()) == []
+    assert violations("1::" * 66_000, DenyList()) == []
+    assert violations("1." * 100_000, DenyList()) == []
+    assert violations("http://" + "a:" * 100_000, DenyList()) == []
+    assert violations("9" * 5000 + ".1.1.1", DenyList()) == []
+    assert time.monotonic() - t < 2
+
+
+def test_unsupported_types_fail_closed():
+    import enum
+
+    class Color(enum.Enum):
+        RED = 1
+
+    def gen():
+        yield "100.64.1.2"
+
+    exc_group = ExceptionGroup("g", [ValueError("x")])
+    for bad in (gen(), iter(["a"]), Color.RED, object(), memoryview(b"abc"), exc_group):
+        assert check_tree({"k": bad}, DenyList()) == ["$.k: unsupported_type"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"{\"password\": \"hunter22\"}",
+        "redis://:hunter22@cache:6379",
+        "postgres://u:pa/ss@db/x",
+        "https://tokenvalue123@github.com/x",
+        "pwd=hunter22",
+    ],
+)
+def test_round2_credentials_refused(text):
+    assert violations(text, DenyList()) == ["credential"]
+
+
+def test_round2_credential_false_positives_pass():
+    assert violations("pwd: /home/x/project", DenyList()) == []
+    assert violations("https://user@example.org/x", DenyList()) == []
+    assert check_tree({"tokenizer": "cl100k_base", "token_count": "123456"}, DenyList()) == []
+
+
+def test_round2_credential_keys_structured():
+    d = DenyList()
+    assert check_tree({"db_password": "hunter22"}, d) == ["$.db_password: credential"]
+    assert check_tree({"auth-token": b"hunter22"}, d) == ["$.auth-token: credential"]
+    assert check_tree({"secret": ["x"]}, d) == ["$.secret: credential"]
+    assert check_tree({"secret": {"a": "abcdefgh"}}, d) == ["$.secret: credential", "$.secret.a: credential"]
+    assert check_tree({"secret": []}, d) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mount /srv/private now",
+        "ls /srv/private\n",
+        "'/srv/private'",
+        "/srv/private, then",
+        "/srv/private:ro",
+        "see /srv/private.",
+        "/srv/private",
+    ],
+)
+def test_round2_path_root_boundaries(text):
+    assert violations(text, DenyList(path_roots=["/srv/private/"])) == ["deny_path"]
+    assert violations(text, DenyList(path_roots=["/srv/private"])) == ["deny_path"]
+
+
+def test_round2_path_root_lookalikes_pass():
+    deny = DenyList(path_roots=["/srv/private/"])
+    assert violations("/srv/privateer /srv/private.bak /srv/private-x", deny) == []

@@ -6,7 +6,9 @@ import dataclasses
 import ipaddress
 import re
 import tomllib
-from pathlib import Path
+from bisect import bisect_left
+from functools import lru_cache
+from pathlib import Path, PurePath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,10 +22,17 @@ _V6_NETS = [ipaddress.ip_network(n) for n in ("::1/128", "fc00::/7", "fe80::/10"
 _V4_RUN_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 _V6_RUN_RE = re.compile(r"[0-9A-Fa-f:.]+")
 _V6_MAX_LEN = 45
-_CRED_WORDS = r"(?:api[_-]?key|apikey|token|secret|password|passwd|pwd)"
-_CREDENTIAL_RE = re.compile(_CRED_WORDS + r"""["']?\s*[:=]\s*["']?[^\s"']{6,}""", re.I)
-_CRED_KEY_RE = re.compile(_CRED_WORDS, re.I)
-_USERINFO_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@", re.I)
+_CRED_WORDS = r"(?:api[_-]?key|apikey|token|secret|password|passwd)"
+_CREDENTIAL_RE = re.compile(
+    r"""(?:""" + _CRED_WORDS + r"""\\?["']?\s*[:=]|pwd\\?["']?\s*=)\s*\\?["']?[^\s"']{6,}""", re.I
+)
+_CRED_KEYS = (
+    "password", "passwd", "pwd", "secret", "token", "api_key", "apikey", "api-key",
+    "access_token", "auth_token", "secret_key", "client_secret",
+)  # fmt: skip
+_USERINFO_RE = re.compile(
+    r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://(?:[^/\s@:]{0,256}:[^\s@]{1,512}|[A-Za-z0-9_-]{8,128})@", re.I
+)
 _BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
 _GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
 _SIGNED_RE = re.compile(r"(?:x-amz-signature|signature|sig|token)=[^\s&\"']{8,}", re.I)
@@ -57,40 +66,59 @@ def _v6_private(ip: ipaddress.IPv6Address) -> bool:
     return any(ip in n for n in _V6_NETS)
 
 
-def _has_private_ip(text: str) -> bool:
-    for m in _V4_RUN_RE.finditer(text):
-        parts = m.group().split(".")
-        octets = [int(x) for x in parts]
-        for i in range(len(octets) - 3):
-            win = octets[i : i + 4]
-            if all(o <= 255 for o in win) and _v4_private(ipaddress.IPv4Address(bytes(win))):
-                return True
-    for m in _V6_RUN_RE.finditer(text):
-        run = m.group()
-        if run.count(":") < 2:
-            continue
-        starts = [0] + [i + 1 for i, c in enumerate(run) if c in ":."]
-        ends = [len(run)] + [i for i, c in enumerate(run) if c in ":."]
-        for s in starts:
-            for e in ends:
-                if e <= s or e - s > _V6_MAX_LEN or run.count(":", s, e) < 2:
-                    continue
-                try:
-                    ip = ipaddress.IPv6Address(run[s:e])
-                except ValueError:
-                    continue
-                if _v6_private(ip):
+def _octet(x: str) -> int:
+    z = x.lstrip("0")
+    if not z:
+        return 0
+    return int(z) if len(z) <= 3 else 999  # over-long components are never an address octet
+
+
+@lru_cache(maxsize=8192)
+def _v6_private_text(cand: str) -> bool:
+    try:
+        return _v6_private(ipaddress.IPv6Address(cand))
+    except ValueError:
+        return False
+
+
+def _v6_run_private(run: str) -> bool:
+    colons = [i for i, c in enumerate(run) if c == ":"]
+    if len(colons) < 2:
+        return False
+    ks = range(2, 8) if "::" in run else ((7, 6) if "." in run else (7,))
+    starts = [0] + [i + 1 for i, c in enumerate(run) if c in ":."]
+    for s in starts:
+        j = bisect_left(colons, s)
+        for k in ks:
+            if j + k - 1 >= len(colons):
+                continue
+            ck = colons[j + k - 1]
+            if ck - s >= _V6_MAX_LEN:
+                break
+            nxt = colons[j + k] if j + k < len(colons) else len(run)
+            for e in range(ck + 1, min(nxt, s + _V6_MAX_LEN) + 1):
+                if (e == nxt or run[e] == ".") and _v6_private_text(run[s:e]):
                     return True
     return False
+
+
+def _has_private_ip(text: str) -> bool:
+    for m in _V4_RUN_RE.finditer(text):
+        octets = [_octet(x) for x in m.group().split(".")]
+        for i in range(len(octets) - 3):
+            win = octets[i : i + 4]
+            if max(win) <= 255 and _v4_private(ipaddress.IPv4Address(bytes(win))):
+                return True
+    return any(_v6_run_private(m.group()) for m in _V6_RUN_RE.finditer(text))
 
 
 def _path_hit(root: str, text: str) -> bool:
     if not root:
         return False
-    if root in text:
-        return True
     bare = root.rstrip("/")
-    return bool(bare) and re.search(re.escape(bare) + r"(?:/|\Z)", text) is not None
+    if not bare:
+        return root in text
+    return re.search(re.escape(bare) + r"(?:(?![\w.-])|(?=\.(?:\s|\Z)))", text) is not None
 
 
 def violations(text: str, deny: DenyList) -> list[str]:
@@ -122,31 +150,47 @@ def _as_text(x: Any) -> str:
     return str(x)
 
 
+def _is_cred_key(key: str) -> bool:
+    k = key.lower()
+    return any(k == w or k.endswith(("_" + w, "-" + w)) for w in _CRED_KEYS)
+
+
 def check_tree(obj: Any, deny: DenyList, where: str = "$", _cred: bool = False) -> list[str]:
     """Walk an object; return '<json path>: <reason>' per violation, in walk order.
 
-    Fails closed: every non-trivial type is stringified and checked; only None/bool/int/float pass.
+    Fails closed: only None/bool/int/float/str/bytes/containers/pydantic models/dataclasses/paths are
+    understood; any other type is reported as ``unsupported_type``.
     """
     if isinstance(obj, BaseModel):
         obj = obj.model_dump(mode="json")
     elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         obj = dataclasses.asdict(obj)
+    elif isinstance(obj, PurePath):
+        obj = str(obj)
     out: list[str] = []
-    if obj is None or isinstance(obj, (bool, int, float)):
+    if obj is None or isinstance(obj, bool):
         return out
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            ks = _as_text(k)
-            child = f"{where}.{ks}"
-            out += [f"{child}: {r}" for r in violations(ks, deny)]
-            out += check_tree(v, deny, child, _cred=_CRED_KEY_RE.search(ks) is not None)
-    elif isinstance(obj, (list, tuple, set, frozenset)):
-        for i, v in enumerate(obj):
-            out += check_tree(v, deny, f"{where}[{i}]")
-    else:
+    if isinstance(obj, (int, float)):
+        if _cred and len(str(obj)) >= 6:
+            out.append(f"{where}: credential")
+        return out
+    if isinstance(obj, (str, bytes, bytearray)):
         text = _as_text(obj)
         reasons = set(violations(text, deny))
-        if _cred and isinstance(obj, str) and len(text) >= 6:
+        if _cred and len(text) >= 6:
             reasons.add("credential")
-        out += [f"{where}: {r}" for r in sorted(reasons)]
-    return out
+        return [f"{where}: {r}" for r in sorted(reasons)]
+    if isinstance(obj, (dict, list, tuple, set, frozenset)):
+        if _cred and obj:
+            out.append(f"{where}: credential")
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                ks = _as_text(k)
+                child = f"{where}.{ks}"
+                out += [f"{child}: {r}" for r in violations(ks, deny)]
+                out += check_tree(v, deny, child, _cred=_cred or _is_cred_key(ks))
+        else:
+            for i, v in enumerate(obj):
+                out += check_tree(v, deny, f"{where}[{i}]", _cred=_cred)
+        return out
+    return [f"{where}: unsupported_type"]
