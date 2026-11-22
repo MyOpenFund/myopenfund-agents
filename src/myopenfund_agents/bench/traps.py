@@ -149,8 +149,8 @@ def known_problem(base: NightInputs, code: str, repo: str, issue_number: int = 1
 def no_run(base: NightInputs, settings: A1Settings | None = None) -> Night:
     """The scheduler did not fire: no run and no source run tonight, history unchanged."""
     settings = settings or A1Settings()
-    if any(i.fingerprint.endswith(":*:unknown") for i in base.open_issues):
-        raise ValueError("an open issue already has a ('*', unknown) fingerprint: the expected action would differ")
+    if any(i.fingerprint.endswith(":*:no_run") for i in base.open_issues):
+        raise ValueError("an open issue already has the no-run fingerprint: the expected action would be a comment")
     inputs = base.model_copy(deep=True)
     inputs.runs = []
     inputs.source_runs = []

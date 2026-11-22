@@ -36,6 +36,11 @@ def summary_fingerprint(repo: str) -> str:
     return f"{AGENT}:{repo}:*:summary"
 
 
+def no_run_fingerprint(repo: str) -> str:
+    """The no-run issue's own fingerprint: never shared with the chronic ('*', unknown) failing-run issue."""
+    return f"{AGENT}:{repo}:*:no_run"
+
+
 def group_outages(findings: Findings, settings: A1Settings) -> Findings:
     codes: dict[Category, set[str]] = {}
     for f in findings.findings:
@@ -79,14 +84,20 @@ def plan_actions(
     repo_of: dict[str, str],
     default_repo: str,
     settings: A1Settings,
+    no_run: bool = False,
 ) -> list[Action]:
+    """Plan GitHub actions. On a no-run night (`NightSummary.no_run`), the ('*', unknown) finding takes the
+    no-run fingerprint: no failing run exists that night, so it is never the chronic failing-run issue."""
     open_by_fp = {i.fingerprint: i for i in open_issues}
     seen: set[str] = set()
     comments: list[Action] = []
     news: list[Action] = []
     for f in group_outages(findings, settings).findings:
         repo = repo_of.get(f.source_code, default_repo) if f.source_code != "*" else default_repo
-        fp = fingerprint(repo, f)
+        if no_run and f.source_code == "*" and f.category == Category.UNKNOWN:
+            fp = no_run_fingerprint(default_repo)
+        else:
+            fp = fingerprint(repo, f)
         if fp in seen:
             continue
         seen.add(fp)

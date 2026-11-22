@@ -421,3 +421,19 @@ def test_report_records_how_it_was_produced(tmp_path, green_history):
     assert payload["thresholds"] == t
     text = md.read_text(encoding="utf-8")
     assert "Profile `local`, repeat 2." in text
+
+
+def test_run_night_no_run_does_not_comment_on_chronic_issue(green_history):
+    """A no-run night with an open chronic ('*', unknown) issue opens its own no-run issue."""
+    from myopenfund_agents.core.inputs import OpenIssue
+
+    base = night(source_runs=[src_run("us", seen=150), src_run("fr"), src_run("se")], history=green_history)
+    base.open_issues.append(OpenIssue(fingerprint=f"a1:{DEFAULT_REPO}:*:unknown", number=7, repo=DEFAULT_REPO))
+    n = traps.no_run(base)
+    finding = Finding(
+        source_code="*", category=Category.UNKNOWN, severity=Severity.ERROR,
+        title="No run finished", diagnosis="No run finished tonight.", evidence=["No run finished during this night."],
+    )  # fmt: skip
+    score = run_night(n, FakeEngine(Findings(findings=[finding])), A1Settings(), 1, None)
+    assert score.attempts[0].actions == [("new_issue", "*", "unknown")]
+    assert score.actions_ok

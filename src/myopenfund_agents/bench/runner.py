@@ -62,7 +62,9 @@ def run_night(
             continue
         # Scored after the deterministic grouping, as A1 would act on it.
         keys = group_outages(result.findings, settings).keys()
-        planned = plan_actions(result.findings, night.inputs.open_issues, repos, DEFAULT_REPO, settings)
+        planned = plan_actions(
+            result.findings, night.inputs.open_issues, repos, DEFAULT_REPO, settings, no_run=summary.no_run
+        )
         actions = [(a.kind.value, a.finding.source_code, a.finding.category.value) for a in planned]
         attempts.append(
             Attempt(

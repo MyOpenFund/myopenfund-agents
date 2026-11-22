@@ -96,3 +96,31 @@ def test_general_outage_with_real_source_normalised():
     assert [f.source_code for f in out.findings] == ["*"]
     acts = plan_actions(Findings(findings=[_f("zz", Category.GENERAL_OUTAGE)]), [], {"zz": "other"}, "d", S)
     assert acts[0].fingerprint == "a1:d:*:general_outage"
+
+
+def test_no_run_finding_does_not_collide_with_chronic_unknown():
+    """Review probe: an open chronic ('*', unknown) issue must not swallow a no-run night."""
+    from myopenfund_agents.core.actions import no_run_fingerprint
+
+    chronic = OpenIssue(fingerprint="a1:data-orchestrator:*:unknown", number=7, repo="data-orchestrator")
+    fs = Findings(findings=[_f("*", Category.UNKNOWN, Severity.ERROR)])
+    acts = plan_actions(fs, [chronic], {}, "data-orchestrator", S, no_run=True)
+    assert [(a.kind, a.fingerprint, a.issue_number) for a in acts] == [
+        (Kind.NEW_ISSUE, "a1:data-orchestrator:*:no_run", None)
+    ]
+    assert no_run_fingerprint("data-orchestrator") == "a1:data-orchestrator:*:no_run"
+
+
+def test_no_run_finding_comments_on_open_no_run_issue():
+    open_no_run = OpenIssue(fingerprint="a1:d:*:no_run", number=11, repo="d")
+    fs = Findings(findings=[_f("*", Category.UNKNOWN, Severity.ERROR), _f("se")])
+    acts = plan_actions(fs, [open_no_run], {}, "d", S, no_run=True)
+    assert [(a.kind, a.fingerprint, a.issue_number) for a in acts] == [
+        (Kind.COMMENT, "a1:d:*:no_run", 11),
+        (Kind.NEW_ISSUE, "a1:d:se:source_site_down", None),
+    ]
+
+
+def test_unknown_star_keeps_its_fingerprint_without_no_run():
+    fs = Findings(findings=[_f("*", Category.UNKNOWN, Severity.ERROR)])
+    assert plan_actions(fs, [], {}, "d", S)[0].fingerprint == "a1:d:*:unknown"

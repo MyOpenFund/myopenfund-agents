@@ -171,11 +171,19 @@ def test_no_run_trap(green_history):
 
 def test_no_run_trap_guards_its_ground_truth(green_history):
     base = _base(green_history)
-    with_issue = base.model_copy(deep=True)
-    with_issue.open_issues.append(OpenIssue(fingerprint="a1:data-orchestrator:*:unknown", number=3, repo="r"))
-    with pytest.raises(ValueError, match="open issue"):
-        traps.no_run(with_issue)
+    with_no_run_issue = base.model_copy(deep=True)
+    with_no_run_issue.open_issues.append(OpenIssue(fingerprint="a1:data-orchestrator:*:no_run", number=4, repo="r"))
+    with pytest.raises(ValueError, match="no-run fingerprint"):
+        traps.no_run(with_no_run_issue)
     with_errors = base.model_copy(deep=True)
     with_errors.discovery_errors.append(DiscoveryError(fingerprint="f1", source_code="us"))
     with pytest.raises(ValueError, match="unusual"):
         traps.no_run(with_errors)
+
+
+def test_no_run_trap_on_base_with_open_chronic_issue(green_history):
+    """The no-run fingerprint differs from the chronic ('*', unknown) one: the expected action stays new_issue."""
+    base = _base(green_history)
+    base.open_issues.append(OpenIssue(fingerprint="a1:data-orchestrator:*:unknown", number=3, repo="r"))
+    t = traps.no_run(base)
+    assert [(a.kind, a.source_code, a.category) for a in t.expected.actions] == [("new_issue", "*", "unknown")]

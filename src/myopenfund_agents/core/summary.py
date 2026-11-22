@@ -57,6 +57,7 @@ class NightSummary:
     unusual: dict[str, SourceState]
     normal_count: int
     failing_runs: list[str]
+    no_run: bool = False  # True exactly when the text carries NO_RUN_LINE
 
 
 def is_bad(row: RunRow | SourceRunRow) -> bool:
@@ -247,7 +248,8 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     header = [
         f"Night {_clean(inputs.night_id)}: {inputs.night_start.isoformat()} to {inputs.night_end.isoformat()}",
     ]
-    if not runs and not tonight_rows:
+    no_run = not runs and not tonight_rows
+    if no_run:
         header.append(NO_RUN_LINE)
     else:
         header.append(f"Runs: {len(runs)} finished, {len(failing)} failing")
@@ -285,4 +287,4 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
             text += block
     if omitted:
         text += f"\nOmitted for size ({len(omitted)} unusual sources): {', '.join(omitted)}\n"
-    return NightSummary(text=text, unusual=unusual, normal_count=normal_count, failing_runs=failing_runs)
+    return NightSummary(text=text, unusual=unusual, normal_count=normal_count, failing_runs=failing_runs, no_run=no_run)
