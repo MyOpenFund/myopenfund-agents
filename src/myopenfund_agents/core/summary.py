@@ -251,8 +251,11 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     no_run = not runs and not tonight_rows
     if no_run:
         header.append(NO_RUN_LINE)
-    else:
+    elif runs:
         header.append(f"Runs: {len(runs)} finished, {len(failing)} failing")
+    else:
+        # Source rows but no run row: a `Runs: 0 finished` line would read like a night where nothing ran.
+        header.append(f"Source runs: {len(tonight_rows)} finished")
     unfinished = (len(inputs.runs) - len(runs)) + (len(inputs.source_runs) - len(tonight_rows))
     if unfinished:
         header.append(f"Unfinished rows ignored: {unfinished}")
