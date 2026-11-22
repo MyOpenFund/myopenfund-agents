@@ -90,3 +90,70 @@ def test_load(tmp_path):
     p.write_text('host = ["a"]\n')
     with pytest.raises(ValueError, match="host"):
         DenyList.load(p)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "host:fd7a:115c:a1e0::1",
+        "Host:fe80::1 down",
+        "[IPv6:fe80::1]",
+        "ip6:fd7a:115c:a1e0::1",
+        "addr_fe80::1",
+        "error:::1 refused",
+        "at 12:00:01:fe80::1",
+        "range fe80::1..fe80::5",
+        "fe80::1.a",
+        "::1:5432",
+        "localhost ::1:5432 refused",
+        "IP 10.0.0.1.443 > 10.0.0.2.5555",
+        "10.0.0.1.5",
+        "3.10.0.0.1",
+        "010.0.0.1",
+        "10.000.0.1",
+        "user:pw@x https://bob:hunter22@nas.example.lan/x",
+        '{"password": "hunter22"}',
+        "'password': 'hunter22'",
+        "pwd=hunter22",
+        "apikey=abcdef123",
+        "api-key: abcdef123",
+        "github_pat_" + "A1_" * 10,
+    ],
+)
+def test_review_round1_bypasses_refused(text):
+    assert violations(text, DenyList()) != []
+
+
+def test_path_root_without_trailing_slash():
+    deny = DenyList(path_roots=["/srv/private/"])
+    assert violations("mount /srv/private", deny) == ["deny_path"]
+    assert violations("mount /srv/private/", deny) == ["deny_path"]
+    assert violations("/srv/privateer", deny) == []
+
+
+def test_check_tree_unknown_types_fail_closed():
+    import dataclasses
+    from pathlib import PurePosixPath
+
+    deny = DenyList(path_roots=["/srv/private/"])
+
+    @dataclasses.dataclass
+    class D:
+        x: str
+
+    assert check_tree(PurePosixPath("/srv/private/a"), deny) == ["$: deny_path"]
+    assert check_tree(b"from 100.64.1.2", deny) == ["$: private_ip"]
+    assert check_tree({"100.64.1.2"}, deny) == ["$[0]: private_ip"]
+    assert check_tree(frozenset({"100.64.1.2"}), deny) == ["$[0]: private_ip"]
+    assert check_tree(("a", "100.64.1.2"), deny) == ["$[1]: private_ip"]
+    assert check_tree(D("100.64.1.2"), deny) == ["$.x: private_ip"]
+    assert check_tree(RuntimeError("connect 100.64.1.2"), deny) == ["$: private_ip"]
+    assert check_tree({("100.64.1.2", 1): 1}, deny) == ["$.('100.64.1.2', 1): private_ip"]
+    assert check_tree([None, True, 3, 1.5], deny) == []
+
+
+def test_check_tree_credential_keys():
+    assert check_tree({"password": "hunter22abc"}, DenyList()) == ["$.password: credential"]
+    assert check_tree({"api_key": "abcdef123", "n": "ok"}, DenyList()) == ["$.api_key: credential"]
+    assert check_tree({"password": "abc"}, DenyList()) == []
+    assert check_tree({"password": "password=hunter22"}, DenyList()) == ["$.password: credential"]

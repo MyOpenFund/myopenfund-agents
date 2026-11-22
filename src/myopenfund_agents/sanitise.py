@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import ipaddress
 import re
 import tomllib
@@ -16,11 +17,15 @@ _V4_NETS = [
 ]
 _V6_NETS = [ipaddress.ip_network(n) for n in ("::1/128", "fc00::/7", "fe80::/10")]
 
-_V4_RE = re.compile(r"(?<!\d)(?<!\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\d)(?!\.\d)")
-_V6_RE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[\w.-]+)?(?![\w])")
-_CREDENTIAL_RE = re.compile(r"(?:api_key|token|secret|password|passwd)\s*[:=]\s*\S{6,}", re.I)
+_V4_RUN_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+_V6_RUN_RE = re.compile(r"[0-9A-Fa-f:.]+")
+_V6_MAX_LEN = 45
+_CRED_WORDS = r"(?:api[_-]?key|apikey|token|secret|password|passwd|pwd)"
+_CREDENTIAL_RE = re.compile(_CRED_WORDS + r"""["']?\s*[:=]\s*["']?[^\s"']{6,}""", re.I)
+_CRED_KEY_RE = re.compile(_CRED_WORDS, re.I)
+_USERINFO_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@", re.I)
 _BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
-_GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")
+_GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
 _SIGNED_RE = re.compile(r"(?:x-amz-signature|signature|sig|token)=[^\s&\"']{8,}", re.I)
 
 
@@ -52,31 +57,40 @@ def _v6_private(ip: ipaddress.IPv6Address) -> bool:
     return any(ip in n for n in _V6_NETS)
 
 
-def _parse(candidate: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    base = candidate.rstrip(".")
-    tries = [base]
-    if base.endswith(":") and not base.endswith("::"):
-        tries.append(base[:-1])  # sentence/log punctuation after an address
-    for c in tries:
-        try:
-            return ipaddress.ip_address(c)
-        except ValueError:
-            continue
-    return None
-
-
 def _has_private_ip(text: str) -> bool:
-    for m in _V4_RE.finditer(text):
-        try:
-            if _v4_private(ipaddress.IPv4Address(m.group())):
+    for m in _V4_RUN_RE.finditer(text):
+        parts = m.group().split(".")
+        octets = [int(x) for x in parts]
+        for i in range(len(octets) - 3):
+            win = octets[i : i + 4]
+            if all(o <= 255 for o in win) and _v4_private(ipaddress.IPv4Address(bytes(win))):
                 return True
-        except ValueError:
+    for m in _V6_RUN_RE.finditer(text):
+        run = m.group()
+        if run.count(":") < 2:
             continue
-    for m in _V6_RE.finditer(text):
-        ip = _parse(m.group())
-        if isinstance(ip, ipaddress.IPv6Address) and _v6_private(ip):
-            return True
+        starts = [0] + [i + 1 for i, c in enumerate(run) if c in ":."]
+        ends = [len(run)] + [i for i, c in enumerate(run) if c in ":."]
+        for s in starts:
+            for e in ends:
+                if e <= s or e - s > _V6_MAX_LEN or run.count(":", s, e) < 2:
+                    continue
+                try:
+                    ip = ipaddress.IPv6Address(run[s:e])
+                except ValueError:
+                    continue
+                if _v6_private(ip):
+                    return True
     return False
+
+
+def _path_hit(root: str, text: str) -> bool:
+    if not root:
+        return False
+    if root in text:
+        return True
+    bare = root.rstrip("/")
+    return bool(bare) and re.search(re.escape(bare) + r"(?:/|\Z)", text) is not None
 
 
 def violations(text: str, deny: DenyList) -> list[str]:
@@ -84,7 +98,7 @@ def violations(text: str, deny: DenyList) -> list[str]:
     found: set[str] = set()
     if _has_private_ip(text):
         found.add("private_ip")
-    if _CREDENTIAL_RE.search(text):
+    if _CREDENTIAL_RE.search(text) or _USERINFO_RE.search(text):
         found.add("credential")
     if _BEARER_RE.search(text):
         found.add("bearer")
@@ -95,25 +109,44 @@ def violations(text: str, deny: DenyList) -> list[str]:
     low = text.lower()
     if any(h and h.lower() in low for h in deny.hosts):
         found.add("deny_host")
-    if any(p and p in text for p in deny.path_roots):
+    if any(_path_hit(p, text) for p in deny.path_roots):
         found.add("deny_path")
     return sorted(found)
 
 
-def check_tree(obj: Any, deny: DenyList, where: str = "$") -> list[str]:
-    """Walk an object; return '<json path>: <reason>' per violation, in walk order."""
+def _as_text(x: Any) -> str:
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x).decode("utf-8", errors="replace")
+    return str(x)
+
+
+def check_tree(obj: Any, deny: DenyList, where: str = "$", _cred: bool = False) -> list[str]:
+    """Walk an object; return '<json path>: <reason>' per violation, in walk order.
+
+    Fails closed: every non-trivial type is stringified and checked; only None/bool/int/float pass.
+    """
     if isinstance(obj, BaseModel):
         obj = obj.model_dump(mode="json")
+    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        obj = dataclasses.asdict(obj)
     out: list[str] = []
-    if isinstance(obj, str):
-        out += [f"{where}: {r}" for r in violations(obj, deny)]
-    elif isinstance(obj, dict):
+    if obj is None or isinstance(obj, (bool, int, float)):
+        return out
+    if isinstance(obj, dict):
         for k, v in obj.items():
-            child = f"{where}.{k}"
-            if isinstance(k, str):
-                out += [f"{child}: {r}" for r in violations(k, deny)]
-            out += check_tree(v, deny, child)
-    elif isinstance(obj, (list, tuple)):
+            ks = _as_text(k)
+            child = f"{where}.{ks}"
+            out += [f"{child}: {r}" for r in violations(ks, deny)]
+            out += check_tree(v, deny, child, _cred=_CRED_KEY_RE.search(ks) is not None)
+    elif isinstance(obj, (list, tuple, set, frozenset)):
         for i, v in enumerate(obj):
             out += check_tree(v, deny, f"{where}[{i}]")
+    else:
+        text = _as_text(obj)
+        reasons = set(violations(text, deny))
+        if _cred and isinstance(obj, str) and len(text) >= 6:
+            reasons.add("credential")
+        out += [f"{where}: {r}" for r in sorted(reasons)]
     return out
