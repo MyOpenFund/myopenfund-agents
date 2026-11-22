@@ -155,9 +155,14 @@ def test_instructions_no_run_rule():
 
     text = A1_INSTRUCTIONS
     rule = next(line for line in text.splitlines() if NO_RUN_LINE in line)
-    assert 'exactly one finding ("*", unknown)' in rule and "severity error" in rule
+    assert '("*", unknown)' in rule and "severity error" in rule
+    assert "exactly one finding" not in text
+    lowered = text.lower()
+    assert "in addition to" in lowered and "unusual sources" in lowered
+    assert "no run finished" in lowered and "did not run" not in lowered
     rule2 = next(line for line in text.splitlines() if line.startswith("2. "))
-    assert "finished run" in rule2  # an empty list is only for a night where something ran
+    # An empty list is only for a night where something ran: run rows (`Runs:`) or only source rows (`Source runs:`).
+    assert "runs finished" in rule2
 
 
 def test_fake_engine_records_prompts():
