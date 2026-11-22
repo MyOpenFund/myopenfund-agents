@@ -46,3 +46,10 @@ def test_inputs_keep_unknown_columns():
     )
     assert inputs.source_runs[0].model_extra == {"new_col": 1}
     assert inputs.cadence is None
+
+
+def test_null_error_samples_become_empty_list():
+    from myopenfund_agents.core.inputs import SourceRunRow
+
+    row = SourceRunRow(run_id="r1", tool="t", command="c", source_code="se", error_samples=None)
+    assert row.error_samples == []

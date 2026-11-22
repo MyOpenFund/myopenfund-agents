@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class _Row(BaseModel):
@@ -39,6 +39,11 @@ class SourceRunRow(_Row):
     truncated: bool | None = None
     error_samples: list[Any] = []
     bad_content: Any = None
+
+    @field_validator("error_samples", mode="before")
+    @classmethod
+    def _null_samples_to_empty(cls, v: Any) -> Any:
+        return [] if v is None else v
 
 
 class DiscoveryError(_Row):
