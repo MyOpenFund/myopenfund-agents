@@ -73,22 +73,68 @@ Every threshold is a setting, overridden by `MOF_AGENTS_A1_<NAME>` (for example
 | `MAX_NEW_ISSUES_PER_RUN` | 5 | above this, new issues collapse into one summary issue |
 | `MAX_SCHEMA_RETRIES` | 2 | retries when the model output fails the schema |
 | `TEMPERATURE` | 0.0 | model temperature |
+| `ENGINE_TIMEOUT_S` | 600.0 | seconds allowed for one model request (`pydantic-ai`: each request, SDK retries included) or one `claude -p` call (`claude-code`) |
+
+A few literals remain in the code. They shape text, they do not judge a night, so they are fixed
+constants rather than settings: `REASON_CHARS` (300, the longest slice of CLI output quoted in a
+`claude-code` error), `FRESH_CADENCE` (12 h, how soon after the night a capture may still trust the
+"now only" cadence view), and the 500 / 1900 character cuts on an evidence line and on the body of a
+summary issue.
 
 ## Bench commands
 
 The bench replays known nights (`bench/nights/`) through the configured engine and scores it against
 `bench/thresholds.toml`.
 
-Capture a past night from the read-only vault MCP (needs `MOF_AGENTS_MCP_URL` and `MOF_AGENTS_MCP_TOKEN`;
-optional `MOF_AGENTS_DENYLIST`, a TOML file of extra `hosts` and `path_roots` to refuse):
+### Deny-list (`MOF_AGENTS_DENYLIST`)
+
+Bench nights and reports are committed to a public repository. Besides its built-in checks (private
+IPv4 and IPv6 addresses, credentials including `Authorization: Basic`, bearer and GitHub tokens, signed
+URLs), the sanitiser refuses the host names and local path roots of your deployment, listed in a TOML
+file named by `MOF_AGENTS_DENYLIST`:
+
+```toml
+hosts = ["nas.example.lan"]
+path_roots = ["/srv/private/"]
+```
+
+Both commands use it: `bench-capture` refuses a night that carries any listed entry, `bench-run`
+refuses or withholds report text that does. `bench-capture` **requires** it: with the variable unset, or
+a deny-list with no host and no path root, it exits 2 unless `--no-denylist` is given explicitly
+(built-in checks only; not recommended for a real deployment).
+
+### Capture a night
+
+Capture a past night from the read-only vault MCP (needs `MOF_AGENTS_MCP_URL`, `MOF_AGENTS_MCP_TOKEN`
+and `MOF_AGENTS_DENYLIST`):
 
 ```sh
 mof-agents bench-capture --night 2026-11-20 --origin green --description "quiet night" \
-  [--cut 06:00] [--corpus central-bank] [--sources us,fr] [--nights bench/nights]
+  [--cut 06:00] [--corpus central-bank] [--sources us,fr] [--nights bench/nights] [--no-denylist]
 ```
 
 The night ends on `--night` at `--cut` UTC. A night that carries any infrastructure detail is refused
-whole. The captured night has no expected answer yet: fill and validate `expected.json` before relying on it.
+whole. The captured night has no expected answer yet: fill and validate `expected.json` and set
+`meta.validated_by` before committing it (CI refuses a committed night that is neither a trap nor validated).
+
+### Traps
+
+A trap damages a green night in one known way and states exactly what A1 must report
+(`myopenfund_agents.bench.traps`); each one checks that the damaged night really carries its signal.
+
+| Trap | Damage | Expected finding | Expected action |
+|---|---|---|---|
+| `volume_drop` | one source sees far fewer documents | `(<source>, volume_drop)` | `new_issue` |
+| `bad_content` | one source returns unreadable PDFs | `(<source>, unreadable_pdf)` | `new_issue` |
+| `general_outage` | every run and source fails (needs more than `GENERAL_OUTAGE_MIN_SOURCES` sources) | `(*, general_outage)` | `new_issue` |
+| `new_source` | a new source appears with zero documents | none | none |
+| `known_problem` | unreadable PDFs on a source with an open issue | `(<source>, unreadable_pdf)` | `comment` |
+| `no_run` | no run and no source run tonight: the scheduler did not fire | `(*, unknown)` | `new_issue` |
+
+`no_run` is an addition to the spec's trap list, pending approval. The instructions tell the model to
+report exactly one `(*, unknown)` error finding when the summary says `No run finished during this night.`
+
+### Run the bench
 
 Run the bench with the configured engine:
 
@@ -99,8 +145,25 @@ mof-agents bench-run --profile local [--repeat 3] [--only 2026-11-20,2026-11-21]
 ```
 
 It prints one line per verdict, then writes `<UTC stamp>-<engine>-<model>.json` and `.md` into `--results`
-and prints the Markdown path. An engine error that carries an infrastructure detail is kept as
-`withheld (<reasons>)`; any other infrastructure detail refuses the report (nothing written).
+and prints the Markdown path.
+
+The JSON report records how it was produced (`repeat`, every A1 setting, the threshold profile values) and,
+for each night and attempt, the engine's findings before grouping (title, diagnosis, evidence, severity:
+kept so diagnoses can be graded later), the planned actions, seconds, schema retries and input/output
+tokens when the engine reports them. An engine error, a finding title, a diagnosis or an evidence line
+that carries an infrastructure detail is kept as `withheld (<reasons>)`; any other infrastructure detail
+refuses the report (nothing written).
+
+### Profiles
+
+`bench/thresholds.toml` holds two threshold profiles, chosen with `--profile`:
+
+- `prod`: the bar for the engine that will run A1 every night. Every expected problem found, no false
+  alarm, every action right, every general outage grouped, every output valid, identical answers on every
+  repeat; no time limit.
+- `local`: the bar for a free local model on modest hardware. At least 80% of expected problems found,
+  no false alarm, every action, grouping and output right, agreement of at least 66% on the worst night,
+  and at most 600 s per night.
 
 ## Exit codes
 
@@ -108,4 +171,4 @@ and prints the Markdown path. An engine error that carries an infrastructure det
 |---|---|---|
 | 0 | night captured | every verdict passes |
 | 1 | capture refused or failed; night directory already exists | a verdict fails; report refused |
-| 2 | missing environment variable, unreadable deny-list or bad argument | engine misconfigured, unreadable deny-list, bad thresholds/argument, unreadable night, unknown `--only` id, no night selected |
+| 2 | missing environment variable, deny-list unset or empty (without `--no-denylist`), unreadable deny-list or bad argument | engine misconfigured, unreadable deny-list, bad thresholds/argument, unreadable night, unknown `--only` id, no night selected |

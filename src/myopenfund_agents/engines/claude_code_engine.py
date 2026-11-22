@@ -1,7 +1,9 @@
 """claude-code engine: `claude -p` on the subscription (CLAUDE_CODE_OAUTH_TOKEN), no tools, JSON-schema output.
 
-Guards: refuses to start when ANTHROPIC_API_KEY is set (it would bill the API), requires CLAUDE_CODE_OAUTH_TOKEN,
-never passes `--bare`, disables every tool (`--tools ""`) and every MCP server (`--strict-mcp-config`).
+Guards: refuses to start when any of ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK or
+CLAUDE_CODE_USE_VERTEX is set non-empty (each would bill an API account instead of the subscription), requires
+CLAUDE_CODE_OAUTH_TOKEN, never passes `--bare`, disables every tool (`--tools ""`) and every MCP server
+(`--strict-mcp-config`). The call is bounded by `A1Settings.engine_timeout_s` unless `timeout_s` is given.
 """
 
 import json
