@@ -145,7 +145,7 @@ def test_cli_capture_writes_pending_night_and_refuses_existing(tmp_path, monkeyp
     monkeypatch.setattr(cli, "mcp_caller", lambda url, token: None)
     monkeypatch.setattr(cli, "capture_night", fake_capture)
     args = ["bench-capture", "--night", "2026-11-22", "--origin", "green", "--description", "quiet",
-            "--sources", "se,fr", "--nights", str(tmp_path)]  # fmt: skip
+            "--sources", "se,fr", "--nights", str(tmp_path), "--no-denylist"]  # fmt: skip
     assert cli.main(args) == 0
     assert seen["night_end"].isoformat() == "2026-11-22T06:00:00+00:00"
     assert seen["sources"] == ["se", "fr"] and seen["window_nights"] == 14 and seen["corpus"] == "central-bank"
@@ -285,7 +285,7 @@ def test_cli_capture_error_exits_1(tmp_path, monkeypatch, capsys):
         raise CaptureError("history incomplete for source 'se'")
 
     monkeypatch.setattr(cli, "capture_night", failing)
-    assert cli.main(_capture_args(tmp_path)) == 1
+    assert cli.main(_capture_args(tmp_path, "--no-denylist")) == 1
     assert "history incomplete" in capsys.readouterr().err
     assert not (tmp_path / "2026-11-22").exists()
 
@@ -352,3 +352,48 @@ def test_report_withholds_finding_texts_with_infra_detail(tmp_path, green_histor
     assert got["diagnosis"] == "withheld (credential, private_ip)"
     assert got["evidence"] == ["bad_content=2", "withheld (private_ip)"]
     assert got["source_code"] == "se"
+
+
+def _fake_capture(green_history):
+    def capture(call, **kw):
+        return night(source_runs=[src_run("se")], history=green_history)
+
+    return capture
+
+
+def test_cli_capture_requires_denylist(tmp_path, monkeypatch, capsys, green_history):
+    _capture_env(monkeypatch)
+    monkeypatch.setattr(cli, "capture_night", _fake_capture(green_history))
+    assert cli.main(_capture_args(tmp_path)) == 2
+    assert "MOF_AGENTS_DENYLIST" in capsys.readouterr().err
+    assert not (tmp_path / "2026-11-22").exists()
+    assert cli.main(_capture_args(tmp_path, "--no-denylist")) == 0
+    assert (tmp_path / "2026-11-22" / "inputs.json").is_file()
+
+
+def test_cli_capture_refuses_empty_denylist(tmp_path, monkeypatch, capsys, green_history):
+    _capture_env(monkeypatch)
+    monkeypatch.setattr(cli, "capture_night", _fake_capture(green_history))
+    deny = tmp_path / "deny.toml"
+    deny.write_text('hosts = [""]\npath_roots = []\n', encoding="utf-8")
+    monkeypatch.setenv("MOF_AGENTS_DENYLIST", str(deny))
+    nights = tmp_path / "nights"
+    assert cli.main(_capture_args(nights)) == 2
+    assert "no host and no path root" in capsys.readouterr().err
+    assert cli.main(_capture_args(nights, "--no-denylist")) == 0
+
+
+def test_cli_capture_passes_denylist_entries(tmp_path, monkeypatch, green_history):
+    _capture_env(monkeypatch)
+    seen = {}
+
+    def capture(call, **kw):
+        seen.update(kw)
+        return night(source_runs=[src_run("se")], history=green_history)
+
+    monkeypatch.setattr(cli, "capture_night", capture)
+    deny = tmp_path / "deny.toml"
+    deny.write_text('hosts = ["nas.example.lan"]\npath_roots = ["/srv/private/"]\n', encoding="utf-8")
+    monkeypatch.setenv("MOF_AGENTS_DENYLIST", str(deny))
+    assert cli.main(_capture_args(tmp_path / "nights")) == 0
+    assert seen["deny"].hosts == ["nas.example.lan"] and seen["deny"].path_roots == ["/srv/private/"]

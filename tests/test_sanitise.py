@@ -276,3 +276,29 @@ def test_round3_unsupported_key_types():
         assert len(out) == 1 and out[0].endswith(": unsupported_type")
     assert check_tree({1: "a", None: "b", 1.5: "d", b"k": "e"}, DenyList()) == []
     assert check_tree({(b"100.64.1.2", 1): 1}, DenyList()) == ["$.(b'100.64.1.2', 1): private_ip"]
+
+
+# --- Final review fix wave ---
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Authorization: Basic dXNlcjpwYXNz",
+        "authorization: basic dXNlcjpwYXNz",
+        "AUTHORIZATION:BASIC dXNlcjpwYXNz",
+        "headers={'Authorization': 'Basic dXNlcjpwYXNz'}",
+        '"authorization": "Basic dXNlcjpwYXNz"',
+    ],
+)
+def test_basic_authorization_refused(text):
+    assert violations(text, DenyList()) == ["credential"]
+
+
+@pytest.mark.parametrize("text", ["Authorization: Basic abc", "basic auth failed", "Basic dXNlcjpwYXNz"])
+def test_basic_authorization_false_positives_pass(text):
+    assert violations(text, DenyList()) == []
+
+
+def test_authorization_key_is_a_credential_key():
+    assert check_tree({"Authorization": "Basic dXNlcjpwYXNz"}, DenyList()) == ["$.Authorization: credential"]

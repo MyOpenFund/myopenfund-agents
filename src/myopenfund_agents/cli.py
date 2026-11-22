@@ -48,6 +48,11 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--origin", required=True, choices=["green", "incident"])
     c.add_argument("--description", required=True)
     c.add_argument("--nights", type=Path, default=Path("bench/nights"), help="bench nights directory")
+    c.add_argument(
+        "--no-denylist",
+        action="store_true",
+        help="capture with the built-in checks only when MOF_AGENTS_DENYLIST is unset or empty (not recommended)",
+    )
 
     r = sub.add_parser("bench-run", help="run the configured engine over the bench nights and score it")
     r.add_argument("--profile", required=True, choices=["prod", "local"])
@@ -63,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
 def _deny_list() -> DenyList | None:
     """The deny-list named by MOF_AGENTS_DENYLIST (empty when unset); None after reporting an error."""
     try:
-        return DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
+        return DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST") or None)
     except (ValueError, OSError) as exc:
         _err(f"MOF_AGENTS_DENYLIST: cannot load the deny-list: {type(exc).__name__}: {str(exc).splitlines()[0]}")
         return None
@@ -97,8 +102,14 @@ def _capture(args: argparse.Namespace) -> int:
     except ValueError as exc:
         _err(str(exc))
         return EXIT_CONFIG
+    if not os.environ.get("MOF_AGENTS_DENYLIST") and not args.no_denylist:
+        _err("MOF_AGENTS_DENYLIST is not set: name the deployment deny-list, or pass --no-denylist explicitly")
+        return EXIT_CONFIG
     deny = _deny_list()
     if deny is None:
+        return EXIT_CONFIG
+    if not any(deny.hosts) and not any(deny.path_roots) and not args.no_denylist:
+        _err("MOF_AGENTS_DENYLIST: the deny-list has no host and no path root; fill it, or pass --no-denylist")
         return EXIT_CONFIG
     target = args.nights / night_end.date().isoformat()
     if target.exists():

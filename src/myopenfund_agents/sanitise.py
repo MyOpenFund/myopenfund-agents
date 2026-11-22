@@ -29,9 +29,10 @@ _CREDENTIAL_RE = re.compile(
 )
 _CRED_KEYS = (
     "password", "passwd", "pwd", "secret", "token", "api_key", "apikey", "api-key",
-    "access_token", "auth_token", "secret_key", "client_secret",
+    "access_token", "auth_token", "secret_key", "client_secret", "authorization",
 )  # fmt: skip
 _USERINFO_RE = re.compile(r"[a-z][a-z0-9+.-]{0,30}://(?:[^/\s@:]{0,256}:[^\s@]{1,512}|[A-Za-z0-9_-]{8,128})@", re.I)
+_BASIC_RE = re.compile(r"""authorization\\?["']?\s*[:=]\s*\\?["']?basic\s+[A-Za-z0-9+/=._~-]{6,}""", re.I)
 _BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
 _GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
 _SIGNED_RE = re.compile(r"(?:x-amz-signature|signature|sig|token)=[^\s&\"']{8,}", re.I)
@@ -125,7 +126,7 @@ def violations(text: str, deny: DenyList) -> list[str]:
     found: set[str] = set()
     if _has_private_ip(text):
         found.add("private_ip")
-    if _CREDENTIAL_RE.search(text) or _USERINFO_RE.search(text):
+    if _CREDENTIAL_RE.search(text) or _USERINFO_RE.search(text) or _BASIC_RE.search(text):
         found.add("credential")
     if _BEARER_RE.search(text):
         found.add("bearer")
