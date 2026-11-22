@@ -10,23 +10,25 @@ from pathlib import Path
 from typing import Any
 
 from myopenfund_agents.bench.fixtures import Night
-from myopenfund_agents.bench.score import Attempt, NightScore, Verdict, score_night, verdicts
+from myopenfund_agents.bench.score import (
+    FALSE_ALARMS,
+    PROBLEMS_FOUND,
+    RATIO_CRITERIA,
+    SLOWEST_NIGHT,
+    Attempt,
+    NightScore,
+    Verdict,
+    score_night,
+    verdicts,
+)
 from myopenfund_agents.core.actions import group_outages, plan_actions
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.engines.base import Engine, EngineError
-from myopenfund_agents.sanitise import DenyList, check_tree, violations
+from myopenfund_agents.sanitise import DenyList, check_tree, redact_paths, violations
 from myopenfund_agents.settings import A1Settings
 
 DEFAULT_CORPUS_REPOS = {"central-bank": "central-bank-corpus", "company": "company-corpus"}
 DEFAULT_REPO = "data-orchestrator"
-
-_RATIOS = {
-    "problems found",
-    "actions as expected",
-    "general outage grouped",
-    "valid output",
-    "repeat agreement (worst night)",
-}
 
 
 def repo_of(night: Night, corpus_repos: Mapping[str, str]) -> dict[str, str]:
@@ -44,6 +46,7 @@ def run_night(
     settings: A1Settings,
     repeat: int,
     corpus_repos: Mapping[str, str] | None,
+    deny: DenyList | None = None,
 ) -> NightScore:
     if repeat < 1:
         raise ValueError(f"repeat must be >= 1, got {repeat}")
@@ -55,7 +58,7 @@ def run_night(
         try:
             result = engine.diagnose(summary.text)
         except EngineError as exc:
-            attempts.append(Attempt(None, None, time.monotonic() - start, error=str(exc)))
+            attempts.append(Attempt(None, None, time.monotonic() - start, error=_error_text(exc, deny or DenyList())))
             continue
         # Scored after the deterministic grouping, as A1 would act on it.
         keys = group_outages(result.findings, settings).keys()
@@ -65,6 +68,14 @@ def run_night(
     return score_night(night, attempts)
 
 
+def _error_text(exc: Exception, deny: DenyList) -> str:
+    """The engine error, or a withheld marker when it carries an infra detail (the report must stay publishable)."""
+    reasons = violations(str(exc), deny)
+    if reasons:
+        return f"{type(exc).__name__}: withheld ({', '.join(reasons)})"
+    return str(exc)
+
+
 def run_bench(
     nights: list[Night],
     engine: Engine,
@@ -72,8 +83,9 @@ def run_bench(
     repeat: int,
     thresholds: dict[str, Any],
     corpus_repos: Mapping[str, str] | None = None,
+    deny: DenyList | None = None,
 ) -> tuple[list[NightScore], list[Verdict]]:
-    scores = [run_night(n, engine, settings, repeat, corpus_repos) for n in nights]
+    scores = [run_night(n, engine, settings, repeat, corpus_repos, deny) for n in nights]
     return scores, verdicts(scores, thresholds)
 
 
@@ -94,15 +106,15 @@ def _safe_name(text: str) -> str:
 
 
 def _fmt(criterion: str, value: float) -> str:
-    if criterion in _RATIOS:
+    if criterion in RATIO_CRITERIA:
         return f"{value:.0%}"
-    if criterion == "slowest night (s)":
+    if criterion == SLOWEST_NIGHT:
         return f"{value:.1f}"
     return f"{value:g}"
 
 
 def _verdict_value(v: Verdict, scores: list[NightScore]) -> str:
-    if v.criterion == "problems found":
+    if v.criterion == PROBLEMS_FOUND:
         incidents = [s for s in scores if s.origin != "green"]
         found = sum(len(s.found) for s in incidents)
         expected = sum(len(s.expected) for s in incidents)
@@ -111,7 +123,7 @@ def _verdict_value(v: Verdict, scores: list[NightScore]) -> str:
 
 
 def _keys(keys: list[tuple[str, str]]) -> str:
-    return ", ".join(f"{s}/{c}" for s, c in keys) or "-"
+    return ", ".join(f"`{s}/{c}`" for s, c in keys) or "-"
 
 
 def _markdown(payload: dict[str, Any], scores: list[NightScore], verdict_list: list[Verdict]) -> str:
@@ -128,7 +140,7 @@ def _markdown(payload: dict[str, Any], scores: list[NightScore], verdict_list: l
         lines.append(f"| {v.criterion} | {_verdict_value(v, scores)} | {_fmt(v.criterion, v.threshold)} | {passed} |")
     lines += [
         "",
-        '"false alarms on green nights" counts extra findings on every night with no expected finding.',
+        f'"{FALSE_ALARMS}" counts extra findings on every night with no expected finding.',
         "",
         "| Night | Origin | Found | Extra | False alarms | Actions | Valid | Agreement | Max s |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -148,10 +160,12 @@ def write_report(
     profile: str,
     scores: list[NightScore],
     verdict_list: list[Verdict],
+    deny: DenyList | None = None,
 ) -> Path:
     """Write `<stamp>-<engine>-<model>.{json,md}` into out_dir; return the Markdown path.
 
     The payload must pass the sanitiser first: results are meant to be committed to a public repository.
+    ``deny`` defaults to the deny-list named by ``MOF_AGENTS_DENYLIST`` (none: built-in checks only).
     """
     now = datetime.now(UTC)
     payload = {
@@ -162,10 +176,11 @@ def write_report(
         "verdicts": _jsonable(verdict_list),
         "nights": _jsonable(scores),
     }
-    deny = DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
+    if deny is None:
+        deny = DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
     found = check_tree(payload, deny)
     if found:
-        raise ValueError("report refused: " + "; ".join(_redact_paths(found, deny)))
+        raise ValueError("report refused: " + "; ".join(redact_paths(found, deny)))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     base = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{_safe_name(engine.name)}-{_safe_name(engine.model)}"
@@ -173,12 +188,3 @@ def write_report(
     md = out_dir / f"{base}.md"
     md.write_text(_markdown(payload, scores, verdict_list), encoding="utf-8")
     return md
-
-
-def _redact_paths(found: list[str], deny: DenyList) -> list[str]:
-    """Keep '<path>: <reason>'; a path that itself carries an infra detail (a dict key) is masked."""
-    out = []
-    for item in found:
-        path, _, reason = item.rpartition(": ")
-        out.append(f"{'<redacted path>' if violations(path, deny) else path}: {reason}")
-    return out

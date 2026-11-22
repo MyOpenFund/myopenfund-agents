@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from myopenfund_agents.bench.capture import CaptureError, capture_night, mcp_caller
-from myopenfund_agents.bench.fixtures import Expected, Meta, Night, load_all, save
+from myopenfund_agents.bench.fixtures import Expected, Meta, Night, load, save
 from myopenfund_agents.bench.runner import run_bench, write_report
 from myopenfund_agents.bench.score import load_thresholds
 from myopenfund_agents.engines.base import EngineError
@@ -60,17 +60,45 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _deny_list() -> DenyList | None:
+    """The deny-list named by MOF_AGENTS_DENYLIST (empty when unset); None after reporting an error."""
+    try:
+        return DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
+    except (ValueError, OSError) as exc:
+        _err(f"MOF_AGENTS_DENYLIST: cannot load the deny-list: {type(exc).__name__}: {str(exc).splitlines()[0]}")
+        return None
+
+
+def _load_nights(root: Path) -> list[Night]:
+    """Every night under root (same selection as fixtures.load_all); ValueError names the unreadable night."""
+    if not root.is_dir():
+        return []
+    nights = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and (p / "inputs.json").is_file()):
+        try:
+            nights.append(load(d))
+        except (ValueError, OSError) as exc:
+            first = str(exc).splitlines()[0] if str(exc) else ""
+            raise ValueError(f"cannot read night {d}: {type(exc).__name__}: {first}") from exc
+    return nights
+
+
 def _capture(args: argparse.Namespace) -> int:
     for name in ("MOF_AGENTS_MCP_URL", "MOF_AGENTS_MCP_TOKEN"):
         if not os.environ.get(name):
             _err(f"{name} is not set")
             return EXIT_CONFIG
     try:
-        night_end = datetime.combine(date.fromisoformat(args.night), time.fromisoformat(args.cut), UTC)
+        cut = time.fromisoformat(args.cut)
+        if cut.tzinfo is not None:
+            raise ValueError(f"--cut is a UTC time without offset, got {args.cut!r}")
+        night_end = datetime.combine(date.fromisoformat(args.night), cut, UTC)
         settings = A1Settings.from_env()
-        deny = DenyList.load(os.environ.get("MOF_AGENTS_DENYLIST"))
-    except (ValueError, OSError) as exc:
+    except ValueError as exc:
         _err(str(exc))
+        return EXIT_CONFIG
+    deny = _deny_list()
+    if deny is None:
         return EXIT_CONFIG
     target = args.nights / night_end.date().isoformat()
     if target.exists():
@@ -117,26 +145,35 @@ def _run(args: argparse.Namespace) -> int:
                 isinstance(k, str) and isinstance(v, str) for k, v in corpus_repos.items()
             ):
                 raise ValueError(f"{args.corpus_repos}: expected a JSON object of corpus -> repository")
+        nights = _load_nights(args.nights)
     except (EngineError, ValueError, OSError) as exc:
         _err(str(exc))
         return EXIT_CONFIG
-    nights = load_all(args.nights)
+    deny = _deny_list()
+    if deny is None:
+        return EXIT_CONFIG
     only = _csv(args.only)
     if only is not None:
+        unknown = sorted(set(only) - {n.inputs.night_id for n in nights})
+        if unknown:
+            _err(f"--only: unknown night id(s) in {args.nights}: {', '.join(unknown)}")
+            return EXIT_CONFIG
         nights = [n for n in nights if n.inputs.night_id in only]
     if not nights:
         _err(f"no night selected in {args.nights}")
         return EXIT_CONFIG
-    scores, verdict_list = run_bench(nights, engine, settings, args.repeat, thresholds, corpus_repos)
+    scores, verdict_list = run_bench(nights, engine, settings, args.repeat, thresholds, corpus_repos, deny)
+    # Verdicts first: a refused report must not cost the results.
+    for v in verdict_list:
+        print(f"{'PASS' if v.passed else 'FAIL'} {v.criterion}: {v.value:g} (threshold {v.threshold:g})")
+    passed = all(v.passed for v in verdict_list)
     try:
-        md = write_report(args.results, engine, args.profile, scores, verdict_list)
+        md = write_report(args.results, engine, args.profile, scores, verdict_list, deny)
     except ValueError as exc:
         _err(str(exc))
         return EXIT_FAIL
     print(md)
-    for v in verdict_list:
-        print(f"{'PASS' if v.passed else 'FAIL'} {v.criterion}: {v.value:g} (threshold {v.threshold:g})")
-    return EXIT_OK if all(v.passed for v in verdict_list) else EXIT_FAIL
+    return EXIT_OK if passed else EXIT_FAIL
 
 
 def main(argv: list[str] | None = None) -> int:

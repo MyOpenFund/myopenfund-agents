@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
 from myopenfund_agents.core.inputs import CadenceRow, DiscoveryError, NightInputs, RunRow, SourceRunRow
-from myopenfund_agents.sanitise import DenyList, check_tree, violations
+from myopenfund_agents.sanitise import DenyList, check_tree, redact_paths
 
 CallTool = Callable[[str, dict], dict]
 
@@ -189,7 +189,7 @@ def capture_night(
     deny = deny or DenyList()
     found = check_tree(inputs, deny)
     if found:
-        raise CaptureError("infra details found: " + "; ".join(_redact_paths(found, deny)))
+        raise CaptureError("infra details found: " + "; ".join(redact_paths(found, deny)))
     return inputs
 
 
@@ -197,15 +197,6 @@ def _reaches(rows: list[Any], bound: datetime) -> bool:
     """True when finished rows exist and the oldest finished_at is at or before ``bound``."""
     finished = [r.finished_at for r in rows if r.finished_at is not None]
     return bool(finished) and min(finished) <= bound
-
-
-def _redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
-    """Keep '<path>: <reason>'; a path that itself carries an infra detail (a dict key) is masked."""
-    out = []
-    for item in found:
-        path, _, reason = item.rpartition(": ")
-        out.append(f"{'<redacted path>' if violations(path, deny) else path}: {reason}")
-    return out
 
 
 def _unwrap_result(result: Any) -> Any:

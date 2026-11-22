@@ -12,6 +12,15 @@ Keys = set[tuple[str, str]]
 ActionTriple = tuple[str, str, str]
 
 OUTAGE = ("*", "general_outage")
+PROBLEMS_FOUND = "problems found"
+FALSE_ALARMS = "false alarms on green nights"
+ACTIONS_OK = "actions as expected"
+OUTAGE_GROUPED = "general outage grouped"
+VALID_OUTPUT = "valid output"
+REPEAT_AGREEMENT = "repeat agreement (worst night)"
+SLOWEST_NIGHT = "slowest night (s)"
+RATIO_CRITERIA = frozenset({PROBLEMS_FOUND, ACTIONS_OK, OUTAGE_GROUPED, VALID_OUTPUT, REPEAT_AGREEMENT})
+
 _REQUIRED = ("min_recall", "max_false_alarms", "min_actions_ok", "min_valid", "min_agreement", "min_grouping")
 _OPTIONAL = ("max_seconds_per_night",)
 
@@ -113,15 +122,15 @@ def verdicts(scores: list[NightScore], t: dict[str, Any]) -> list[Verdict]:
     valid = sum(1 for s in scores if s.valid) / len(scores) if scores else 1.0
     agreement = min((s.agreement for s in scores), default=1.0)
     out = [
-        Verdict("problems found", recall, t["min_recall"], recall >= t["min_recall"]),
-        Verdict("false alarms on green nights", alarms, t["max_false_alarms"], alarms <= t["max_false_alarms"]),
-        Verdict("actions as expected", actions, t["min_actions_ok"], actions >= t["min_actions_ok"]),
-        Verdict("general outage grouped", grouped, t["min_grouping"], grouped >= t["min_grouping"]),
-        Verdict("valid output", valid, t["min_valid"], valid >= t["min_valid"]),
-        Verdict("repeat agreement (worst night)", agreement, t["min_agreement"], agreement >= t["min_agreement"]),
+        Verdict(PROBLEMS_FOUND, recall, t["min_recall"], recall >= t["min_recall"]),
+        Verdict(FALSE_ALARMS, alarms, t["max_false_alarms"], alarms <= t["max_false_alarms"]),
+        Verdict(ACTIONS_OK, actions, t["min_actions_ok"], actions >= t["min_actions_ok"]),
+        Verdict(OUTAGE_GROUPED, grouped, t["min_grouping"], grouped >= t["min_grouping"]),
+        Verdict(VALID_OUTPUT, valid, t["min_valid"], valid >= t["min_valid"]),
+        Verdict(REPEAT_AGREEMENT, agreement, t["min_agreement"], agreement >= t["min_agreement"]),
     ]
     if "max_seconds_per_night" in t:
         slowest = max((s.seconds_max for s in scores), default=0.0)
         limit = t["max_seconds_per_night"]
-        out.append(Verdict("slowest night (s)", slowest, limit, slowest <= limit))
+        out.append(Verdict(SLOWEST_NIGHT, slowest, limit, slowest <= limit))
     return out

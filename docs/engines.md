@@ -98,8 +98,9 @@ mof-agents bench-run --profile local [--repeat 3] [--only 2026-11-20,2026-11-21]
   [--corpus-repos corpus-repos.json]
 ```
 
-It writes `<UTC stamp>-<engine>-<model>.json` and `.md` into `--results` (refused, nothing written, if the
-report would carry an infrastructure detail), prints the Markdown path and one line per verdict.
+It prints one line per verdict, then writes `<UTC stamp>-<engine>-<model>.json` and `.md` into `--results`
+and prints the Markdown path. An engine error that carries an infrastructure detail is kept as
+`withheld (<reasons>)`; any other infrastructure detail refuses the report (nothing written).
 
 ## Exit codes
 
@@ -107,4 +108,4 @@ report would carry an infrastructure detail), prints the Markdown path and one l
 |---|---|---|
 | 0 | night captured | every verdict passes |
 | 1 | capture refused or failed; night directory already exists | a verdict fails; report refused |
-| 2 | missing environment variable or bad argument | engine misconfigured, bad thresholds/argument, no night selected |
+| 2 | missing environment variable, unreadable deny-list or bad argument | engine misconfigured, unreadable deny-list, bad thresholds/argument, unreadable night, unknown `--only` id, no night selected |

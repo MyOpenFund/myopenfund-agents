@@ -153,3 +153,138 @@ def test_cli_capture_writes_pending_night_and_refuses_existing(tmp_path, monkeyp
     assert meta["origin"] == "green" and meta["validated_by"] is None
     assert "expected answers pending validation" in meta["notes"]
     assert cli.main(args) == 1
+
+
+# --- Fix round 1 ---
+
+PRIVATE_ERROR = "connect to http://100.64.1.2:11434 refused"
+
+
+class _PrivateErrorEngine:
+    name = "broken"
+    model = "none"
+
+    def diagnose(self, summary_text: str):
+        raise EngineError(PRIVATE_ERROR)
+
+
+def _run_args(tmp_path):
+    return ["bench-run", "--profile", "local", "--repeat", "1", "--nights", str(tmp_path / "nights"),
+            "--thresholds", str(THRESHOLDS), "--results", str(tmp_path / "results")]  # fmt: skip
+
+
+def test_run_night_withholds_infra_error_text(green_history):
+    score = run_night(_known_problem_night(green_history), _PrivateErrorEngine(), A1Settings(), 1, None)
+    assert score.attempts[0].error == "EngineError: withheld (private_ip)"
+
+
+def test_cli_private_engine_error_keeps_verdicts_and_report(tmp_path, monkeypatch, capsys, green_history):
+    save(_known_problem_night(green_history), tmp_path / "nights")
+    monkeypatch.delenv("MOF_AGENTS_DENYLIST", raising=False)
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: _PrivateErrorEngine())
+    assert cli.main(_run_args(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "FAIL valid output" in out and "PASS false alarms on green nights" in out
+    (report,) = (tmp_path / "results").glob("*.json")
+    text = report.read_text(encoding="utf-8")
+    assert "withheld (private_ip)" in text and "100.64.1.2" not in text
+
+
+def test_cli_run_bad_denylist_exits_2(tmp_path, monkeypatch, capsys, green_history):
+    save(_known_problem_night(green_history), tmp_path / "nights")
+    monkeypatch.setenv("MOF_AGENTS_DENYLIST", str(tmp_path / "missing.toml"))
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(_se_unreadable()))
+    assert cli.main(_run_args(tmp_path)) == 2
+    assert "MOF_AGENTS_DENYLIST" in capsys.readouterr().err
+    assert not (tmp_path / "results").exists()
+
+
+def test_write_report_uses_given_deny_list(tmp_path, green_history):
+    from myopenfund_agents.sanitise import DenyList
+
+    engine = FakeEngine(_se_unreadable(), model="mirror.example.org")
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
+                                 load_thresholds(THRESHOLDS, "local"))  # fmt: skip
+    with pytest.raises(ValueError, match="report refused"):
+        write_report(tmp_path, engine, "local", scores, verdicts, deny=DenyList(hosts=["mirror.example.org"]))
+
+
+def test_report_wraps_keys_in_backticks(tmp_path, green_history):
+    engine = FakeEngine(_se_unreadable())
+    scores, verdicts = run_bench([_known_problem_night(green_history)], engine, A1Settings(), 1,
+                                 load_thresholds(THRESHOLDS, "local"))  # fmt: skip
+    text = write_report(tmp_path, engine, "local", scores, verdicts).read_text(encoding="utf-8")
+    assert "| `se/unreadable_pdf` |" in text
+
+
+def test_criterion_constants_exported():
+    from myopenfund_agents.bench import score
+
+    assert score.PROBLEMS_FOUND == "problems found"
+    assert score.SLOWEST_NIGHT == "slowest night (s)"
+
+
+def test_cli_run_corrupt_night_exits_2(tmp_path, monkeypatch, capsys, green_history):
+    d = save(_known_problem_night(green_history), tmp_path / "nights")
+    (d / "expected.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(_se_unreadable()))
+    assert cli.main(_run_args(tmp_path)) == 2
+    assert str(d) in capsys.readouterr().err
+
+
+def test_cli_run_unknown_only_id_exits_2(tmp_path, monkeypatch, capsys, green_history):
+    n = _known_problem_night(green_history)
+    save(n, tmp_path / "nights")
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(_se_unreadable()))
+    assert cli.main([*_run_args(tmp_path), "--only", f"{n.inputs.night_id},ghost-night"]) == 2
+    assert "ghost-night" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("content", ["{oops", "[1, 2]", '{"central-bank": 3}'])
+def test_cli_run_bad_corpus_repos_exits_2(tmp_path, monkeypatch, green_history, content):
+    save(_known_problem_night(green_history), tmp_path / "nights")
+    f = tmp_path / "repos.json"
+    f.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(_se_unreadable()))
+    assert cli.main([*_run_args(tmp_path), "--corpus-repos", str(f)]) == 2
+
+
+def test_cli_run_corpus_repos_mapping_applies(tmp_path, monkeypatch, green_history):
+    # the open issue is on central-bank-corpus; mapping the corpus elsewhere turns the comment into a new issue
+    save(_known_problem_night(green_history), tmp_path / "nights")
+    f = tmp_path / "repos.json"
+    f.write_text('{"central-bank": "other-repo"}', encoding="utf-8")
+    monkeypatch.setattr(cli, "engine_from_env", lambda settings: FakeEngine(_se_unreadable()))
+    assert cli.main(_run_args(tmp_path)) == 0
+    assert cli.main([*_run_args(tmp_path), "--corpus-repos", str(f)]) == 1
+
+
+def _capture_env(monkeypatch):
+    monkeypatch.setenv("MOF_AGENTS_MCP_URL", "https://mcp.example.com/mcp")
+    monkeypatch.setenv("MOF_AGENTS_MCP_TOKEN", "t")
+    monkeypatch.delenv("MOF_AGENTS_DENYLIST", raising=False)
+    monkeypatch.setattr(cli, "mcp_caller", lambda url, token: None)
+
+
+def _capture_args(tmp_path, *extra):
+    return ["bench-capture", "--night", "2026-11-22", "--origin", "green", "--description", "d",
+            "--nights", str(tmp_path), *extra]  # fmt: skip
+
+
+def test_cli_capture_cut_with_timezone_exits_2(tmp_path, monkeypatch):
+    _capture_env(monkeypatch)
+    assert cli.main(_capture_args(tmp_path, "--cut", "06:00+02:00")) == 2
+
+
+def test_cli_capture_error_exits_1(tmp_path, monkeypatch, capsys):
+    from myopenfund_agents.bench.capture import CaptureError
+
+    _capture_env(monkeypatch)
+
+    def failing(call, **kw):
+        raise CaptureError("history incomplete for source 'se'")
+
+    monkeypatch.setattr(cli, "capture_night", failing)
+    assert cli.main(_capture_args(tmp_path)) == 1
+    assert "history incomplete" in capsys.readouterr().err
+    assert not (tmp_path / "2026-11-22").exists()

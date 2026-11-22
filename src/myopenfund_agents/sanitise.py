@@ -7,6 +7,7 @@ import ipaddress
 import re
 import tomllib
 from bisect import bisect_left
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path, PurePath
 from typing import Any
@@ -215,3 +216,12 @@ def check_tree(obj: Any, deny: DenyList, where: str = "$", _cred: bool = False) 
                 out += check_tree(v, deny, f"{where}[{i}]", _cred=_cred)
         return out
     return [f"{where}: unsupported_type"]
+
+
+def redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
+    """Keep '<path>: <reason>' from check_tree; a path that itself carries an infra detail (a dict key) is masked."""
+    out = []
+    for item in found:
+        path, _, reason = item.rpartition(": ")
+        out.append(f"{'<redacted path>' if violations(path, deny) else path}: {reason}")
+    return out
