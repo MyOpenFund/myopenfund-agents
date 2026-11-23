@@ -87,10 +87,11 @@ summary issue.
 
 ### Failures shared by several sources
 
-A run over several sources stamps its one outcome on each of them. When some of its rows carry a signal
-(truncation, fetch error, failed document, bad content, error sample), only those sources are flagged
-`failed_run`, tonight and in the history; when none does, all of them are, so an unexplained failure is
-never hidden. The failing run itself is always listed.
+A run over several sources stamps its one outcome on each of them. When a **degraded** run (completed, exit
+3) has rows with a signal of their own (truncation, fetch error, failed document, bad content, error
+sample), only those sources are flagged `failed_run`, tonight and in the history; the others are named on
+one line. A crashed run, or a degraded run no row explains, flags every source: an unexplained failure is
+never hidden. Long overdue cadence series are counted and their sources named, not flagged.
 
 ## Bench commands
 

@@ -369,7 +369,8 @@ class UntilCall(FakeCall):
         until = datetime.fromisoformat(args["until"]) if "until" in args else datetime.max.replace(tzinfo=UTC)
 
         def page(rows):
-            kept = [r for r in rows if datetime.fromisoformat(r["finished_at"]) <= until]
+            kept = [r for r in rows if datetime.fromisoformat(r["finished_at"]) <= until
+                    and datetime.fromisoformat(r["finished_at"]) >= datetime.fromisoformat(args["since"])]  # fmt: skip
             return sorted(kept, key=lambda r: r["finished_at"], reverse=True)[:PAGE]
 
         return _resp(source_runs=page(self.source_runs), runs=page(self.runs))
@@ -386,7 +387,7 @@ def test_old_night_is_retried_with_until():
     assert [r.run_id for r in inputs.runs] == ["r-tonight"]
     assert len(call.calls) == 2
     assert "until" not in call.calls[0][1]
-    assert call.calls[1][1]["until"] == END.isoformat()
+    assert call.calls[1][1] == {**call.calls[0][1], "until": END.isoformat()}
 
 
 def test_old_night_source_runs_page_is_retried_with_until():
@@ -410,3 +411,9 @@ def test_still_full_after_until_is_refused():
     runs = [_run(f"r{i}", END - timedelta(minutes=i)) for i in range(PAGE + 1)]
     with pytest.raises(CaptureError, match="runs page full"):
         _capture(UntilCall(runs, [_sr("aa", TONIGHT)]), sources=["aa"])
+
+
+def test_source_runs_still_full_after_until_is_refused():
+    rows = [_sr("aa", END - timedelta(minutes=i), run_id=f"s{i}") for i in range(PAGE + 1)]
+    with pytest.raises(CaptureError, match="history incomplete"):
+        _capture(UntilCall([], rows), sources=["aa"])

@@ -353,7 +353,7 @@ def test_chronic_cadence_is_one_line_and_new_cadence_is_flagged(green_history):
     summary = build_summary(night(_tonight(), green_history, cadence=cadence), SETTINGS)
     assert sorted(summary.unusual) == ["jp", "nl"]
     assert summary.unusual["jp"].days_late == 5
-    assert "Long overdue series (more than 14 days late, not findings): 3" in summary.text
+    assert "Long overdue series (more than 14 days late, not findings): 3 (ch, jp, se)" in summary.text
     assert summary.normal_count == 3
 
 
@@ -362,3 +362,27 @@ def test_cadence_new_max_days_zero_means_no_upper_bound(green_history):
     summary = build_summary(night(_tonight(), green_history, cadence=cadence), A1Settings(cadence_new_max_days=0))
     assert list(summary.unusual) == ["ch"]
     assert "Long overdue" not in summary.text
+
+
+def test_crashed_shared_run_clears_nobody():
+    """Only a degraded (completed) run can clear its silent sources: after a crash, silence proves nothing."""
+    rows = [src_run(c, run_id="crash", outcome="failed", exit_code=1, **kw)
+            for c, kw in (("au", {"seen": 0}), ("se", {"error_samples": ["HTTP 404"]}))]  # fmt: skip
+    assert sorted(build_summary(night(rows), SETTINGS).unusual) == ["au", "se"]
+
+
+def test_contradictory_outcome_and_exit_code_clears_nobody():
+    rows = [
+        src_run(c, run_id="r", outcome="degraded", exit_code=1, **kw)
+        for c, kw in (("au", {}), ("se", {"fetch_errors": 1}))
+    ]
+    assert sorted(build_summary(night(rows), SETTINGS).unusual) == ["au", "se"]
+
+
+def test_cleared_sources_are_named_even_without_a_run_row():
+    text = build_summary(night(_shared_run(se={"fetch_errors": 1})), SETTINGS).text
+    assert "Degraded run repec-n0 (repec): no signal of their own, not flagged for it: au, ca" in text
+
+
+def test_no_cleared_line_when_nothing_is_cleared():
+    assert "no signal of their own" not in build_summary(night(_shared_run()), SETTINGS).text

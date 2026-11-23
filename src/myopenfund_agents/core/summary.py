@@ -24,6 +24,7 @@ FLAG_ORDER = (
     "cadence_overdue",
     "open_discovery_errors",
 )
+DEGRADED_EXIT = 3  # exit code of a run that completed with problems (crawler contract)
 BAD_OUTCOMES = frozenset({"degraded", "failed"})
 NO_DETAIL_SUFFIX = " (no per-source detail: failed before or outside sources)"
 NO_RUN_LINE = "No run finished during this night."
@@ -68,15 +69,32 @@ def _has_own_signal(row: SourceRunRow) -> bool:
     return bool(row.truncated or row.fetch_errors or row.docs_failed or _count(row.bad_content) or row.error_samples)
 
 
+def _is_degraded(row: SourceRunRow) -> bool:
+    """The run completed with problems (exit 3): only then does a silent row mean its source went fine."""
+    return row.outcome == "degraded" and row.exit_code in (DEGRADED_EXIT, None)
+
+
 def _implicated(rows: list[SourceRunRow]) -> list[SourceRunRow]:
     """Bad rows that a source answers for.
 
-    A run over several sources stamps its one outcome on every source row. When some rows of a bad run carry
-    a signal of their own, they explain the failure and the silent rows are cleared; when none does, every
-    row is kept: an unexplained failure is reported, never dropped.
+    A run over several sources stamps its one outcome on every source row. When some rows of a degraded run
+    carry a signal of their own, they explain it and the silent rows are cleared. A crashed run clears nobody,
+    nor does a run no row explains: an unexplained failure is reported, never dropped.
     """
-    explained = {r.run_id for r in rows if is_bad(r) and _has_own_signal(r)}
-    return [r for r in rows if is_bad(r) and (r.run_id not in explained or _has_own_signal(r))]
+    explained = {r.run_id for r in rows if _is_degraded(r) and _has_own_signal(r)}
+    return [r for r in rows if is_bad(r) and not (r.run_id in explained and _is_degraded(r) and not _has_own_signal(r))]
+
+
+def _cleared_lines(rows: list[SourceRunRow], implicated: set[int]) -> list[str]:
+    cleared: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for r in rows:
+        if is_bad(r) and id(r) not in implicated:
+            cleared[r.run_id, r.command].add(r.source_code)
+    return [
+        f"Degraded run {_clean(run_id)} ({_clean(command)}): no signal of their own, not flagged for it: "
+        + ", ".join(_clean(c) for c in sorted(codes))
+        for (run_id, command), codes in cleared.items()
+    ]
 
 
 def _clean(value: Any) -> str:
@@ -290,10 +308,12 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     tail = [f"Sources: {normal_count} normal, {len(unusual)} unusual"]
     if inputs.cadence is None:
         tail.append(CADENCE_UNKNOWN_LINE)
-    long_overdue = sum(1 for c in inputs.cadence or [] if _long_overdue(c, settings))
+    tail += _cleared_lines(tonight_rows, implicated)
+    long_overdue = [c for c in inputs.cadence or [] if _long_overdue(c, settings)]
     if long_overdue:
         tail.append(
-            f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): {long_overdue}"
+            f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): "
+            f"{len(long_overdue)} ({', '.join(_clean(c) for c in sorted({c.source_code for c in long_overdue}))})"
         )
     unattached = sum(1 for e in inputs.discovery_errors if e.source_code is None)
     if unattached:
