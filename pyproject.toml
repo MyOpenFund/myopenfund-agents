@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myopenfund-agents"
+version = "0.1.0"
+description = "MyOpenFund agents: A1 nightly triage core and engine bench"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.8",
+    "pydantic-ai-slim[openai,mcp]>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+mof-agents = "myopenfund_agents.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myopenfund_agents"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not local_llm'"
+markers = [
+    "local_llm: requires a local LLM endpoint (deselected by default)",
+]
+
+[tool.ruff]
+line-length = 122
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
