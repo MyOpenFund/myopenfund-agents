@@ -386,3 +386,29 @@ def test_cleared_sources_are_named_even_without_a_run_row():
 
 def test_no_cleared_line_when_nothing_is_cleared():
     assert "no signal of their own" not in build_summary(night(_shared_run()), SETTINGS).text
+
+
+def test_note_lines_respect_the_budget_and_never_push_out_findings():
+    codes = [f"c{i:02d}" for i in range(20)]
+    tonight = []
+    for n in range(60):
+        rid = f"run{n}"
+        kw = {"run_id": rid, "command": "x" * 400 if n == 0 else "repec", "outcome": "degraded", "exit_code": 3}
+        tonight += [src_run("se", fetch_errors=1, **kw), *(src_run(c, **kw) for c in codes)]
+    cadence = [CadenceRow(source_code=f"late{i}", days_late=99) for i in range(400)]
+    text = build_summary(night(tonight, cadence=cadence), A1Settings(summary_char_budget=4000)).text
+    assert "[se]" in text
+    assert len(text) <= 4000
+    assert "more degraded runs with sources not flagged" in text
+    assert "x" * 301 not in text
+
+
+def test_note_char_budget_is_a_setting():
+    text = build_summary(night(_shared_run(se={"fetch_errors": 1})), A1Settings(note_char_budget=10)).text
+    assert "... and 1 more degraded runs with sources not flagged" in text
+
+
+def test_prompt_explains_the_note_lines():
+    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
+
+    assert "Degraded run" in A1_INSTRUCTIONS and "Long overdue series" in A1_INSTRUCTIONS

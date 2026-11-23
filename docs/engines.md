@@ -71,6 +71,7 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `CADENCE_GRACE_DAYS` | 0 | days of lateness tolerated before cadence is flagged |
 | `CADENCE_NEW_MAX_DAYS` | 14 | a series later than this is long overdue: counted in one line, never flagged (0 = no upper bound) |
 | `SUMMARY_CHAR_BUDGET` | 12000 | maximum summary size sent to the model |
+| `NOTE_CHAR_BUDGET` | 2000 | characters for the degraded-run and the long-overdue lines, each group at most half of it, never over half the summary budget |
 | `ERROR_SAMPLE_MAX_CHARS` | 300 | maximum length of one error sample |
 | `ERROR_SAMPLES_PER_SOURCE` | 3 | error samples kept per source |
 | `GENERAL_OUTAGE_MIN_SOURCES` | 5 | more failing sources than this are grouped as one general outage |

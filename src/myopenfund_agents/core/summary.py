@@ -85,16 +85,24 @@ def _implicated(rows: list[SourceRunRow]) -> list[SourceRunRow]:
     return [r for r in rows if is_bad(r) and not (r.run_id in explained and _is_degraded(r) and not _has_own_signal(r))]
 
 
-def _cleared_lines(rows: list[SourceRunRow], implicated: set[int]) -> list[str]:
+def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: int, budget: int) -> list[str]:
     cleared: dict[tuple[str, str], set[str]] = defaultdict(set)
     for r in rows:
         if is_bad(r) and id(r) not in implicated:
             cleared[r.run_id, r.command].add(r.source_code)
-    return [
-        f"Degraded run {_clean(run_id)} ({_clean(command)}): no signal of their own, not flagged for it: "
-        + ", ".join(_clean(c) for c in sorted(codes))
-        for (run_id, command), codes in cleared.items()
-    ]
+    lines: list[str] = []
+    used = 0
+    for (run_id, command), codes in cleared.items():
+        line = (
+            f"Degraded run {_clean(run_id)} ({_cut(_clean(command), max_chars)}): "
+            f"no signal of their own, not flagged for it: {', '.join(_clean(c) for c in sorted(codes))}"
+        )
+        if used + len(line) + 1 > budget:
+            lines.append(f"... and {len(cleared) - len(lines)} more degraded runs with sources not flagged")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines
 
 
 def _clean(value: Any) -> str:
@@ -308,12 +316,14 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     tail = [f"Sources: {normal_count} normal, {len(unusual)} unusual"]
     if inputs.cadence is None:
         tail.append(CADENCE_UNKNOWN_LINE)
-    tail += _cleared_lines(tonight_rows, implicated)
+    note_budget = min(settings.note_char_budget, settings.summary_char_budget // 2) // 2
+    tail += _cleared_lines(tonight_rows, implicated, settings.error_sample_max_chars, note_budget)
     long_overdue = [c for c in inputs.cadence or [] if _long_overdue(c, settings)]
     if long_overdue:
+        names = _cut(", ".join(_clean(c) for c in sorted({c.source_code for c in long_overdue})), note_budget)
         tail.append(
             f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): "
-            f"{len(long_overdue)} ({', '.join(_clean(c) for c in sorted({c.source_code for c in long_overdue}))})"
+            f"{len(long_overdue)} ({names})"
         )
     unattached = sum(1 for e in inputs.discovery_errors if e.source_code is None)
     if unattached:

@@ -16,6 +16,8 @@ Rules:
 6. Use source_code "*" for findings that are not about a single source.
 7. If the summary says "No run finished during this night.", report one finding ("*", unknown), severity error,
    for the missing run, in addition to findings for any unusual sources. No run finished: this is never a quiet night.
+8. "Degraded run ... not flagged for it" and "Long overdue series" lines are context, never findings: the
+   degraded run is reported through the sources flagged for it.
 
 Categories (one per finding):
 - source_site_down: the source website cannot be reached (fetch errors, timeouts, HTTP errors).
