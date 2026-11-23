@@ -69,6 +69,7 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `VOLUME_DROP_RATIO` | 0.2 | a source is flagged below this share of its median nightly volume |
 | `MIN_HISTORY_NIGHTS` | 5 | history nights needed before a volume drop is judged |
 | `CADENCE_GRACE_DAYS` | 0 | days of lateness tolerated before cadence is flagged |
+| `CADENCE_NEW_MAX_DAYS` | 14 | a series later than this is long overdue: counted in one line, never flagged (0 = no upper bound) |
 | `SUMMARY_CHAR_BUDGET` | 12000 | maximum summary size sent to the model |
 | `ERROR_SAMPLE_MAX_CHARS` | 300 | maximum length of one error sample |
 | `ERROR_SAMPLES_PER_SOURCE` | 3 | error samples kept per source |
@@ -83,6 +84,13 @@ constants rather than settings: `REASON_CHARS` (300, the longest slice of CLI ou
 `claude-code` error), `FRESH_CADENCE` (12 h, how soon after the night a capture may still trust the
 "now only" cadence view), and the 500 / 1900 character cuts on an evidence line and on the body of a
 summary issue.
+
+### Failures shared by several sources
+
+A run over several sources stamps its one outcome on each of them. When some of its rows carry a signal
+(truncation, fetch error, failed document, bad content, error sample), only those sources are flagged
+`failed_run`, tonight and in the history; when none does, all of them are, so an unexplained failure is
+never hidden. The failing run itself is always listed.
 
 ## Bench commands
 
@@ -117,7 +125,9 @@ mof-agents bench-capture --night 2026-11-20 --origin green --description "quiet 
 ```
 
 The night ends on `--night` at `--cut` UTC. A night that carries any infrastructure detail is refused
-whole. The captured night has no expected answer yet: fill and validate `expected.json` and set
+whole. When newer rows push the night out of the server's newest-first page, the capture asks again with
+`until` (needs a `vault_runs_status` that supports it), and refuses if the page is still cut. The captured
+night has no expected answer yet: fill and validate `expected.json` and set
 `meta.validated_by` before committing it (CI refuses a committed night that is neither a trap nor validated).
 
 ### Traps
@@ -134,7 +144,7 @@ A trap damages a green night in one known way and states exactly what A1 must re
 | `known_problem` | unreadable PDFs on a source with an open issue | `(<source>, unreadable_pdf)` | `comment` |
 | `no_run` | no run and no source run tonight: the scheduler did not fire | `(*, unknown)` | `new_issue` |
 
-`no_run` is an addition to the spec's trap list, pending approval. The instructions tell the model to
+`no_run` is an addition to the spec's trap list (approved 2026-11-23). The instructions tell the model to
 report one `(*, unknown)` error finding for the missing run when the summary says
 `No run finished during this night.`, in addition to findings for any unusual sources. On such a night
 the deterministic layer gives that finding its own fingerprint, `a1:<default_repo>:*:no_run`, so it is

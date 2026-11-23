@@ -350,3 +350,63 @@ def test_mcp_sdk_symbols_used_by_capture_exist():
 
     assert callable(create_mcp_http_client) and callable(streamable_http_client) and ClientSession
     assert {"is_error", "structured_content"} <= set(CallToolResult.model_fields)
+
+
+# --- Old nights: bounded retry -----------------------------------------------------------------
+
+
+class UntilCall(FakeCall):
+    """A fake server that honours `until`: one newest-first page of PAGE rows, as the real one."""
+
+    def __init__(self, runs, source_runs, supports_until=True):
+        super().__init__({})
+        self.runs, self.source_runs, self.supports_until = runs, source_runs, supports_until
+
+    def __call__(self, name, args):
+        self.calls.append((name, dict(args)))
+        if "until" in args and not self.supports_until:
+            raise CaptureError("MCP tool error: unexpected keyword argument")
+        until = datetime.fromisoformat(args["until"]) if "until" in args else datetime.max.replace(tzinfo=UTC)
+
+        def page(rows):
+            kept = [r for r in rows if datetime.fromisoformat(r["finished_at"]) <= until]
+            return sorted(kept, key=lambda r: r["finished_at"], reverse=True)[:PAGE]
+
+        return _resp(source_runs=page(self.source_runs), runs=page(self.runs))
+
+
+def _old_night(**kw):
+    newer = [_run(f"new{i}", END + timedelta(hours=1, minutes=i)) for i in range(PAGE)]
+    return UntilCall([*newer, _run("r-tonight", TONIGHT), _run("r-old", OLD)], [_sr("aa", TONIGHT)], **kw)
+
+
+def test_old_night_is_retried_with_until():
+    call = _old_night()
+    inputs = _capture(call, sources=["aa"])
+    assert [r.run_id for r in inputs.runs] == ["r-tonight"]
+    assert len(call.calls) == 2
+    assert "until" not in call.calls[0][1]
+    assert call.calls[1][1]["until"] == END.isoformat()
+
+
+def test_old_night_source_runs_page_is_retried_with_until():
+    newer = [_sr("aa", END + timedelta(minutes=i + 1), run_id=f"n{i}") for i in range(PAGE)]
+    call = UntilCall([_run("r-tonight", TONIGHT)], [*newer, _sr("aa", TONIGHT, run_id="t")])
+    assert [r.run_id for r in _capture(call, sources=["aa"]).source_runs] == ["t"]
+
+
+def test_server_without_until_is_refused_with_a_clear_message():
+    with pytest.raises(CaptureError, match="server may not support 'until'"):
+        _capture(_old_night(supports_until=False), sources=["aa"])
+
+
+def test_recent_night_never_sends_until():
+    call = UntilCall([_run("r-tonight", TONIGHT)], [_sr("aa", TONIGHT)])
+    _capture(call, sources=["aa"])
+    assert len(call.calls) == 1 and "until" not in call.calls[0][1]
+
+
+def test_still_full_after_until_is_refused():
+    runs = [_run(f"r{i}", END - timedelta(minutes=i)) for i in range(PAGE + 1)]
+    with pytest.raises(CaptureError, match="runs page full"):
+        _capture(UntilCall(runs, [_sr("aa", TONIGHT)]), sources=["aa"])

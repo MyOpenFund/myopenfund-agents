@@ -64,6 +64,21 @@ def is_bad(row: RunRow | SourceRunRow) -> bool:
     return row.outcome in BAD_OUTCOMES or row.exit_code not in (0, None)
 
 
+def _has_own_signal(row: SourceRunRow) -> bool:
+    return bool(row.truncated or row.fetch_errors or row.docs_failed or _count(row.bad_content) or row.error_samples)
+
+
+def _implicated(rows: list[SourceRunRow]) -> list[SourceRunRow]:
+    """Bad rows that a source answers for.
+
+    A run over several sources stamps its one outcome on every source row. When some rows of a bad run carry
+    a signal of their own, they explain the failure and the silent rows are cleared; when none does, every
+    row is kept: an unexplained failure is reported, never dropped.
+    """
+    explained = {r.run_id for r in rows if is_bad(r) and _has_own_signal(r)}
+    return [r for r in rows if is_bad(r) and (r.run_id not in explained or _has_own_signal(r))]
+
+
 def _clean(value: Any) -> str:
     """One-line, delimiter-safe rendering of an input-derived value."""
     text = value if isinstance(value, str) else str(value)
@@ -91,9 +106,18 @@ def _history_index(night_start: datetime, finished_at: datetime) -> int:
     return int((night_start - finished_at) / ONE_DAY) + 1
 
 
-def _days_late(rows: list[CadenceRow]) -> int | None:
-    # Non-finite values (nan, inf) carry no usable lateness and are ignored.
-    values = [r.days_late for r in rows if r.days_late is not None and math.isfinite(r.days_late)]
+def _long_overdue(row: CadenceRow, settings: A1Settings) -> bool:
+    limit = settings.cadence_new_max_days
+    return bool(limit) and row.days_late is not None and math.isfinite(row.days_late) and row.days_late > limit
+
+
+def _days_late(rows: list[CadenceRow], settings: A1Settings) -> int | None:
+    # Non-finite values (nan, inf) carry no usable lateness and are ignored; long overdue series are only counted.
+    values = [
+        r.days_late
+        for r in rows
+        if r.days_late is not None and math.isfinite(r.days_late) and not _long_overdue(r, settings)
+    ]
     return int(max(values)) if values else None
 
 
@@ -110,6 +134,7 @@ def _source_state(
     cadence_rows: list[CadenceRow] | None,
     discovery_count: int,
     corpus_hint: str | None,
+    implicated: set[int],
     settings: A1Settings,
 ) -> SourceState:
     samples: list[str] = []
@@ -127,17 +152,17 @@ def _source_state(
         fetch_errors=sum(r.fetch_errors or 0 for r in tonight),
         bad_content=sum(_count(r.bad_content) for r in tonight),
         truncated=any(bool(r.truncated) for r in tonight),
-        failed_commands=[r.command for r in tonight if is_bad(r)],
+        failed_commands=[r.command for r in tonight if id(r) in implicated],
         error_samples=samples,
         history_nights=len(history),
-        days_late=None if cadence_rows is None else _days_late(cadence_rows),
+        days_late=None if cadence_rows is None else _days_late(cadence_rows, settings),
         open_discovery_errors=discovery_count,
     )
     if history:
         totals = [sum(r.docs_seen or 0 for r in rows) for rows in history.values()]
         state.median_docs_seen = float(statistics.median(totals))
     k = 1
-    while k in history and any(is_bad(r) for r in history[k]):
+    while k in history and any(id(r) in implicated for r in history[k]):
         state.consecutive_failed_nights += 1
         k += 1
 
@@ -222,9 +247,11 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     overdue = {
         code
         for code, crows in cadence_by_code.items()
-        if (late := _days_late(crows)) is not None and late > settings.cadence_grace_days
+        if (late := _days_late(crows, settings)) is not None and late > settings.cadence_grace_days
     }
     codes = sorted(set(tonight) | overdue | set(discovery_by_code))
+    history_rows = [r for by_night in history.values() for rows in by_night.values() for r in rows]
+    implicated = {id(r) for r in [*_implicated(tonight_rows), *_implicated(history_rows)]}
     states = [
         _source_state(
             code,
@@ -233,6 +260,7 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
             None if inputs.cadence is None else cadence_by_code.get(code, []),
             discovery_by_code.get(code, 0),
             corpus_hints.get(code),
+            implicated,
             settings,
         )
         for code in codes
@@ -262,6 +290,11 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     tail = [f"Sources: {normal_count} normal, {len(unusual)} unusual"]
     if inputs.cadence is None:
         tail.append(CADENCE_UNKNOWN_LINE)
+    long_overdue = sum(1 for c in inputs.cadence or [] if _long_overdue(c, settings))
+    if long_overdue:
+        tail.append(
+            f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): {long_overdue}"
+        )
     unattached = sum(1 for e in inputs.discovery_errors if e.source_code is None)
     if unattached:
         tail.append(f"Open discovery errors without a source: {unattached}")
