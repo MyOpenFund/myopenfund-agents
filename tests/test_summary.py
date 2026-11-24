@@ -297,3 +297,118 @@ def test_naive_timestamps_read_as_utc():
     assert inputs.history[0].finished_at.tzinfo is UTC and inputs.runs[0].finished_at.tzinfo is UTC
     summary = build_summary(inputs, A1Settings())
     assert "Runs: 1 finished, 0 failing" in summary.text
+
+
+def _shared_run(night_index=0, *, se=None, codes=("au", "ca", "se")):
+    """One degraded run over several sources: its outcome is stamped on every source row."""
+    extra = {"se": se or {}}
+    return [
+        src_run(c, night=night_index, run_id=f"repec-n{night_index}", command="repec", outcome="degraded",
+                exit_code=3, **extra.get(c, {}))
+        for c in codes
+    ]  # fmt: skip
+
+
+def test_shared_run_failure_belongs_to_the_source_with_the_signal():
+    summary = build_summary(night(_shared_run(se={"truncated": True, "fetch_errors": 1})), SETTINGS)
+    assert list(summary.unusual) == ["se"]
+    assert summary.unusual["se"].flags == ["failed_run", "truncated", "fetch_errors"]
+    assert summary.normal_count == 2
+
+
+def test_shared_run_failure_without_any_signal_keeps_every_source():
+    """Nobody explains the failure: fail towards reporting, never towards silence."""
+    summary = build_summary(night(_shared_run()), SETTINGS)
+    assert sorted(summary.unusual) == ["au", "ca", "se"]
+
+
+def test_shared_run_signals_are_independent_between_runs():
+    other = src_run("au", run_id="own", outcome="failed", exit_code=1)
+    summary = build_summary(night([*_shared_run(se={"fetch_errors": 1}), other]), SETTINGS)
+    assert sorted(summary.unusual) == ["au", "se"]
+    assert summary.unusual["au"].failed_commands == ["harvest au"]
+
+
+def test_error_sample_alone_counts_as_a_signal():
+    summary = build_summary(night(_shared_run(se={"error_samples": ["HTTP 500"]})), SETTINGS)
+    assert list(summary.unusual) == ["se"]
+
+
+def test_shared_run_history_does_not_count_for_innocent_sources():
+    history = _shared_run(1, se={"fetch_errors": 1}) + _shared_run(2, se={"fetch_errors": 1})
+    tonight = [src_run("au", outcome="failed", exit_code=1), src_run("se", outcome="failed", exit_code=1)]
+    summary = build_summary(night(tonight, history), SETTINGS)
+    assert summary.unusual["au"].consecutive_failed_nights == 0
+    assert summary.unusual["se"].consecutive_failed_nights == 2
+
+
+def test_chronic_cadence_is_one_line_and_new_cadence_is_flagged(green_history):
+    cadence = [
+        CadenceRow(source_code="jp", corpus="central-bank", doc_type="C1", days_late=134),
+        CadenceRow(source_code="jp", corpus="central-bank", doc_type="D1", days_late=5),
+        CadenceRow(source_code="ch", corpus="central-bank", doc_type="C1", days_late=132),
+        CadenceRow(source_code="se", corpus="central-bank", doc_type="C1", days_late=15),
+        CadenceRow(source_code="nl", corpus="central-bank", doc_type="C1", days_late=14),
+    ]
+    summary = build_summary(night(_tonight(), green_history, cadence=cadence), SETTINGS)
+    assert sorted(summary.unusual) == ["jp", "nl"]
+    assert summary.unusual["jp"].days_late == 5
+    assert "Long overdue series (more than 14 days late, not findings): 3 (ch, jp, se)" in summary.text
+    assert summary.normal_count == 3
+
+
+def test_cadence_new_max_days_zero_means_no_upper_bound(green_history):
+    cadence = [CadenceRow(source_code="ch", corpus="central-bank", days_late=132)]
+    summary = build_summary(night(_tonight(), green_history, cadence=cadence), A1Settings(cadence_new_max_days=0))
+    assert list(summary.unusual) == ["ch"]
+    assert "Long overdue" not in summary.text
+
+
+def test_crashed_shared_run_clears_nobody():
+    """Only a degraded (completed) run can clear its silent sources: after a crash, silence proves nothing."""
+    rows = [src_run(c, run_id="crash", outcome="failed", exit_code=1, **kw)
+            for c, kw in (("au", {"seen": 0}), ("se", {"error_samples": ["HTTP 404"]}))]  # fmt: skip
+    assert sorted(build_summary(night(rows), SETTINGS).unusual) == ["au", "se"]
+
+
+def test_contradictory_outcome_and_exit_code_clears_nobody():
+    rows = [
+        src_run(c, run_id="r", outcome="degraded", exit_code=1, **kw)
+        for c, kw in (("au", {}), ("se", {"fetch_errors": 1}))
+    ]
+    assert sorted(build_summary(night(rows), SETTINGS).unusual) == ["au", "se"]
+
+
+def test_cleared_sources_are_named_even_without_a_run_row():
+    text = build_summary(night(_shared_run(se={"fetch_errors": 1})), SETTINGS).text
+    assert "Degraded run repec-n0 (repec): no signal of their own, not flagged for it: au, ca" in text
+
+
+def test_no_cleared_line_when_nothing_is_cleared():
+    assert "no signal of their own" not in build_summary(night(_shared_run()), SETTINGS).text
+
+
+def test_note_lines_respect_the_budget_and_never_push_out_findings():
+    codes = [f"c{i:02d}" for i in range(20)]
+    tonight = []
+    for n in range(60):
+        rid = f"run{n}"
+        kw = {"run_id": rid, "command": "x" * 400 if n == 0 else "repec", "outcome": "degraded", "exit_code": 3}
+        tonight += [src_run("se", fetch_errors=1, **kw), *(src_run(c, **kw) for c in codes)]
+    cadence = [CadenceRow(source_code=f"late{i}", days_late=99) for i in range(400)]
+    text = build_summary(night(tonight, cadence=cadence), A1Settings(summary_char_budget=4000)).text
+    assert "[se]" in text
+    assert len(text) <= 4000
+    assert "more degraded runs with sources not flagged" in text
+    assert "x" * 301 not in text
+
+
+def test_note_char_budget_is_a_setting():
+    text = build_summary(night(_shared_run(se={"fetch_errors": 1})), A1Settings(note_char_budget=10)).text
+    assert "... and 1 more degraded runs with sources not flagged" in text
+
+
+def test_prompt_explains_the_note_lines():
+    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
+
+    assert "Degraded run" in A1_INSTRUCTIONS and "Long overdue series" in A1_INSTRUCTIONS

@@ -24,6 +24,7 @@ FLAG_ORDER = (
     "cadence_overdue",
     "open_discovery_errors",
 )
+DEGRADED_EXIT = 3  # exit code of a run that completed with problems (crawler contract)
 BAD_OUTCOMES = frozenset({"degraded", "failed"})
 NO_DETAIL_SUFFIX = " (no per-source detail: failed before or outside sources)"
 NO_RUN_LINE = "No run finished during this night."
@@ -64,6 +65,46 @@ def is_bad(row: RunRow | SourceRunRow) -> bool:
     return row.outcome in BAD_OUTCOMES or row.exit_code not in (0, None)
 
 
+def _has_own_signal(row: SourceRunRow) -> bool:
+    return bool(row.truncated or row.fetch_errors or row.docs_failed or _count(row.bad_content) or row.error_samples)
+
+
+def _is_degraded(row: SourceRunRow) -> bool:
+    """The run completed with problems (exit 3): only then does a silent row mean its source went fine."""
+    return row.outcome == "degraded" and row.exit_code in (DEGRADED_EXIT, None)
+
+
+def _implicated(rows: list[SourceRunRow]) -> list[SourceRunRow]:
+    """Bad rows that a source answers for.
+
+    A run over several sources stamps its one outcome on every source row. When some rows of a degraded run
+    carry a signal of their own, they explain it and the silent rows are cleared. A crashed run clears nobody,
+    nor does a run no row explains: an unexplained failure is reported, never dropped.
+    """
+    explained = {r.run_id for r in rows if _is_degraded(r) and _has_own_signal(r)}
+    return [r for r in rows if is_bad(r) and not (r.run_id in explained and _is_degraded(r) and not _has_own_signal(r))]
+
+
+def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: int, budget: int) -> list[str]:
+    cleared: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for r in rows:
+        if is_bad(r) and id(r) not in implicated:
+            cleared[r.run_id, r.command].add(r.source_code)
+    lines: list[str] = []
+    used = 0
+    for (run_id, command), codes in cleared.items():
+        line = (
+            f"Degraded run {_clean(run_id)} ({_cut(_clean(command), max_chars)}): "
+            f"no signal of their own, not flagged for it: {', '.join(_clean(c) for c in sorted(codes))}"
+        )
+        if used + len(line) + 1 > budget:
+            lines.append(f"... and {len(cleared) - len(lines)} more degraded runs with sources not flagged")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines
+
+
 def _clean(value: Any) -> str:
     """One-line, delimiter-safe rendering of an input-derived value."""
     text = value if isinstance(value, str) else str(value)
@@ -91,9 +132,18 @@ def _history_index(night_start: datetime, finished_at: datetime) -> int:
     return int((night_start - finished_at) / ONE_DAY) + 1
 
 
-def _days_late(rows: list[CadenceRow]) -> int | None:
-    # Non-finite values (nan, inf) carry no usable lateness and are ignored.
-    values = [r.days_late for r in rows if r.days_late is not None and math.isfinite(r.days_late)]
+def _long_overdue(row: CadenceRow, settings: A1Settings) -> bool:
+    limit = settings.cadence_new_max_days
+    return bool(limit) and row.days_late is not None and math.isfinite(row.days_late) and row.days_late > limit
+
+
+def _days_late(rows: list[CadenceRow], settings: A1Settings) -> int | None:
+    # Non-finite values (nan, inf) carry no usable lateness and are ignored; long overdue series are only counted.
+    values = [
+        r.days_late
+        for r in rows
+        if r.days_late is not None and math.isfinite(r.days_late) and not _long_overdue(r, settings)
+    ]
     return int(max(values)) if values else None
 
 
@@ -110,6 +160,7 @@ def _source_state(
     cadence_rows: list[CadenceRow] | None,
     discovery_count: int,
     corpus_hint: str | None,
+    implicated: set[int],
     settings: A1Settings,
 ) -> SourceState:
     samples: list[str] = []
@@ -127,17 +178,17 @@ def _source_state(
         fetch_errors=sum(r.fetch_errors or 0 for r in tonight),
         bad_content=sum(_count(r.bad_content) for r in tonight),
         truncated=any(bool(r.truncated) for r in tonight),
-        failed_commands=[r.command for r in tonight if is_bad(r)],
+        failed_commands=[r.command for r in tonight if id(r) in implicated],
         error_samples=samples,
         history_nights=len(history),
-        days_late=None if cadence_rows is None else _days_late(cadence_rows),
+        days_late=None if cadence_rows is None else _days_late(cadence_rows, settings),
         open_discovery_errors=discovery_count,
     )
     if history:
         totals = [sum(r.docs_seen or 0 for r in rows) for rows in history.values()]
         state.median_docs_seen = float(statistics.median(totals))
     k = 1
-    while k in history and any(is_bad(r) for r in history[k]):
+    while k in history and any(id(r) in implicated for r in history[k]):
         state.consecutive_failed_nights += 1
         k += 1
 
@@ -222,9 +273,11 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     overdue = {
         code
         for code, crows in cadence_by_code.items()
-        if (late := _days_late(crows)) is not None and late > settings.cadence_grace_days
+        if (late := _days_late(crows, settings)) is not None and late > settings.cadence_grace_days
     }
     codes = sorted(set(tonight) | overdue | set(discovery_by_code))
+    history_rows = [r for by_night in history.values() for rows in by_night.values() for r in rows]
+    implicated = {id(r) for r in [*_implicated(tonight_rows), *_implicated(history_rows)]}
     states = [
         _source_state(
             code,
@@ -233,6 +286,7 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
             None if inputs.cadence is None else cadence_by_code.get(code, []),
             discovery_by_code.get(code, 0),
             corpus_hints.get(code),
+            implicated,
             settings,
         )
         for code in codes
@@ -262,6 +316,15 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     tail = [f"Sources: {normal_count} normal, {len(unusual)} unusual"]
     if inputs.cadence is None:
         tail.append(CADENCE_UNKNOWN_LINE)
+    note_budget = min(settings.note_char_budget, settings.summary_char_budget // 2) // 2
+    tail += _cleared_lines(tonight_rows, implicated, settings.error_sample_max_chars, note_budget)
+    long_overdue = [c for c in inputs.cadence or [] if _long_overdue(c, settings)]
+    if long_overdue:
+        names = _cut(", ".join(_clean(c) for c in sorted({c.source_code for c in long_overdue})), note_budget)
+        tail.append(
+            f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): "
+            f"{len(long_overdue)} ({names})"
+        )
     unattached = sum(1 for e in inputs.discovery_errors if e.source_code is None)
     if unattached:
         tail.append(f"Open discovery errors without a source: {unattached}")

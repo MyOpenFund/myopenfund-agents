@@ -137,10 +137,18 @@ def capture_night(
         return None
 
     for code in codes:
-        resp = call(
-            "vault_runs_status",
-            {"corpus": corpus, "source_code": code, "since": since.isoformat(), "limit": PAGE},
-        )
+        args = {"corpus": corpus, "source_code": code, "since": since.isoformat(), "limit": PAGE}
+        resp = call("vault_runs_status", args)
+        if _page_cut(resp, since, night_start):
+            # The newest rows pushed the night out of the page: ask again, bounded at the end of the night.
+            # Only then, so a server without `until` still serves recent nights.
+            try:
+                resp = call("vault_runs_status", {**args, "until": night_end.isoformat()})
+            except CaptureError as exc:
+                raise CaptureError(
+                    f"history incomplete or runs page full for source {code!r}, and the bounded retry failed "
+                    f"(the server may not support 'until'): {exc}"
+                ) from exc
         raw_source_runs = _rows(resp, "source_runs", required=True)
         parsed = [_model(SourceRunRow, r) for r in raw_source_runs]
         if len(raw_source_runs) >= PAGE and not _reaches(parsed, since):
@@ -191,6 +199,16 @@ def capture_night(
     if found:
         raise CaptureError("infra details found: " + "; ".join(redact_paths(found, deny)))
     return inputs
+
+
+def _page_cut(resp: Any, since: datetime, night_start: datetime) -> bool:
+    """True when a full page of source runs or runs does not reach the bound the capture needs."""
+
+    def cut(key: str, cls: type, bound: datetime, required: bool = False) -> bool:
+        raw = _rows(resp, key, required=required)
+        return len(raw) >= PAGE and not _reaches([_model(cls, r) for r in raw], bound)
+
+    return cut("source_runs", SourceRunRow, since, required=True) or cut("runs", RunRow, night_start)
 
 
 def _reaches(rows: list[Any], bound: datetime) -> bool:
