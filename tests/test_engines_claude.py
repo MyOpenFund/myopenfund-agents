@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -773,3 +774,13 @@ def test_redaction_walk_covers_keys_and_values_and_is_iterative():
     for _ in range(100_000):
         deep = [deep]
     assert e._redact_decoded(deep) is deep  # no RecursionError
+
+
+def test_a_real_explanations_envelope():
+    """A real `claude -p` output (ids replaced) anchors the parser, the model name and the token count."""
+    raw = (Path(__file__).parent / "data" / "claude_output.json").read_text(encoding="utf-8")
+    result = engine(FakeRunner((0, raw))).explain("p", frozenset({"f1"}))
+    assert [e.finding_id for e in result.explanations.explanations] == ["f1"]
+    assert result.explanations.explanations[0].quotes
+    assert result.model == "claude-sonnet-5-5"
+    assert (result.retries, result.input_tokens, result.output_tokens) == (0, 2510, 462)
