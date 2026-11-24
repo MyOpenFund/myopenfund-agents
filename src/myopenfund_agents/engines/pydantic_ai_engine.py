@@ -4,14 +4,14 @@ import os
 import time
 
 import openai
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import AgentRunError, UserError
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import AgentRunError, ModelRetry, UserError
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from myopenfund_agents.core.findings import Findings
-from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt
+from myopenfund_agents.core.explanations import Explanations, id_error
+from myopenfund_agents.core.prompt import explain_instructions
 from myopenfund_agents.engines.base import EngineError, EngineResult
 from myopenfund_agents.settings import A1Settings
 
@@ -40,26 +40,36 @@ class PydanticAIEngine:
     def __init__(self, model: Model | str, settings: A1Settings, model_label: str | None = None) -> None:
         self.model = model_label or (model if isinstance(model, str) else model.model_name)
         os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")  # default only; the user may override it
+        model_settings = {
+            "temperature": settings.temperature,
+            # `timeout`: each HTTP attempt; `request_timeout`: the whole request, SDK retries included.
+            "timeout": settings.engine_timeout_s,
+            "request_timeout": settings.engine_timeout_s,
+        }
         try:
+            # The ids differ per call, so they travel as run dependencies: one agent serves every night.
             self._agent = Agent(
                 model,
-                output_type=Findings,
-                instructions=A1_INSTRUCTIONS,
+                output_type=Explanations,
+                deps_type=frozenset[str],
+                instructions=explain_instructions(settings),
                 retries=settings.max_schema_retries,
-                model_settings={
-                    "temperature": settings.temperature,
-                    # `timeout`: each HTTP attempt; `request_timeout`: the whole request, SDK retries included.
-                    "timeout": settings.engine_timeout_s,
-                    "request_timeout": settings.engine_timeout_s,
-                },
+                model_settings=model_settings,
             )
         except CONSTRUCTION_FAILURES as exc:
             raise EngineError(f"{self.name} ({self.model}): cannot build the agent: {exc}") from exc
 
-    def diagnose(self, summary_text: str) -> EngineResult:
+        @self._agent.output_validator
+        def _ids_ok(ctx: RunContext[frozenset[str]], output: Explanations) -> Explanations:
+            reason = id_error(output, ctx.deps, settings)
+            if reason:
+                raise ModelRetry(reason)
+            return output
+
+    def explain(self, prompt: str, ids: frozenset[str]) -> EngineResult:
         start = time.monotonic()
         try:
-            result = self._agent.run_sync(user_prompt(summary_text))
+            result = self._agent.run_sync(prompt, deps=ids)
         except ENGINE_FAILURES as exc:
             raise EngineError(f"{self.name} ({self.model}): {type(exc).__name__}: {exc}") from exc
         seconds = time.monotonic() - start
@@ -69,11 +79,11 @@ class PydanticAIEngine:
         if not hasattr(usage, "requests"):
             usage = usage()
         return EngineResult(
-            findings=result.output,
-            engine=self.name,
-            model=self.model,
-            seconds=seconds,
-            retries=max(usage.requests - 1, 0),
-            input_tokens=usage.input_tokens or None,
-            output_tokens=usage.output_tokens or None,
+            self.name,
+            self.model,
+            seconds,
+            max(usage.requests - 1, 0),
+            usage.input_tokens or None,
+            usage.output_tokens or None,
+            explanations=result.output,
         )

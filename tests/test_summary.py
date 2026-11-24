@@ -410,14 +410,6 @@ def test_note_char_budget_is_a_setting():
     assert "... and 1 more degraded runs with sources not flagged" in text
 
 
-def test_prompt_explains_the_note_lines():
-    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
-
-    assert "Degraded run" in A1_INSTRUCTIONS and "Long overdue series" in A1_INSTRUCTIONS
-    assert "more degraded runs with sources not flagged" in A1_INSTRUCTIONS
-    assert "Omitted for size" in A1_INSTRUCTIONS
-
-
 def _degraded_crowd(n: int) -> NightInputs:
     """n shared degraded runs, each explained by `se`, with their run rows."""
     rows, runs = [], []
@@ -505,26 +497,12 @@ def test_names_after_a_huge_one_are_still_listed():
     assert "(z0, z1 (+1 more))" in build_summary(night(cadence=cadence), A1Settings()).text
 
 
-def test_prompt_covers_unexplained_runs_and_missing_causes():
-    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS as text
-
-    assert "no per-source detail" in text
-    assert "documents failed without an error sample" in " ".join(text.split())
-
-
 def test_failed_run_explained_by_no_flagged_source_stays_unexplained():
     """An ok row with only an error sample raises no flag, so it cannot explain its failed run."""
     run = RunRow(run_id="x", tool="t", command="c", outcome="failed", exit_code=1, finished_at=END)
     summary = build_summary(night([src_run("se", run_id="x", error_samples=["boom"])], runs=[run]), A1Settings())
     assert not summary.unusual
     assert "- x (no per-source detail" in summary.text
-
-
-def test_prompt_puts_unexplained_runs_under_a_general_outage():
-    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
-
-    rule = " ".join(A1_INSTRUCTIONS.split())
-    assert "a general outage covers such runs, unless the summary shows a different cause for them" in rule
 
 
 def test_negative_counters_never_explain_a_failed_run():

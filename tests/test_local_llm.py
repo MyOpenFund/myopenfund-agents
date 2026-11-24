@@ -10,7 +10,9 @@ import pytest
 
 from conftest import night, src_run
 from myopenfund_agents.bench import traps
-from myopenfund_agents.core.findings import Findings
+from myopenfund_agents.core.detector import detect
+from myopenfund_agents.core.explanations import Explanations
+from myopenfund_agents.core.prompt import explain_prompt
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.engines.pydantic_ai_engine import PydanticAIEngine, build_model
 from myopenfund_agents.settings import A1Settings
@@ -30,10 +32,12 @@ def _green(history):
 
 
 @pytest.mark.parametrize("case", ["green", "bad_content"])
-def test_local_model_returns_valid_findings(case: str, green_history) -> None:
+def test_local_model_returns_valid_explanations(case: str, green_history) -> None:
     base = _green(green_history)
     inputs = base if case == "green" else traps.bad_content(base, "se").inputs
     settings = A1Settings.from_env()
     engine = PydanticAIEngine(build_model(MODEL, BASE_URL, None), settings)
-    result = engine.diagnose(build_summary(inputs, settings).text)
-    assert isinstance(result.findings, Findings)
+    summary = build_summary(inputs, settings)
+    detected = detect(summary, settings)
+    result = engine.explain(explain_prompt(summary.text, detected), frozenset(d.finding_id for d in detected))
+    assert isinstance(result.explanations, Explanations)

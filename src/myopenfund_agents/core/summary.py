@@ -1,6 +1,6 @@
 """Deterministic night summary: the only view of a night an LLM ever sees.
 
-Every input-derived string placed into the text goes through `_clean`, which replaces `<` by `‹`
+Every input-derived string placed into the text goes through `clean`, which replaces `<` by `‹`
 so no value can close the `<summary>` delimiter (Review Focus 2).
 """
 
@@ -30,6 +30,12 @@ NO_DETAIL_SUFFIX = " (no per-source detail: failed before or outside sources)"
 NO_RUN_LINE = "No run finished during this night."
 CADENCE_UNKNOWN_LINE = "Cadence: not known for this night"
 ONE_DAY = timedelta(days=1)
+# Line prefixes of a source block; the detector finds the lines of its evidence by them.
+TONIGHT_PREFIX = "  tonight:"
+HISTORY_PREFIX = "  history:"
+DAYS_LATE_PREFIX = "  days_late="
+FAILED_COMMANDS_PREFIX = "  failed_commands:"
+SAMPLE_PREFIX = "  sample:"
 
 
 @dataclass
@@ -59,6 +65,9 @@ class NightSummary:
     normal_count: int
     failing_runs: list[str]
     no_run: bool = False  # True exactly when the text carries NO_RUN_LINE
+    blocks: dict[str, str] = field(default_factory=dict)  # every unusual source's block, the omitted ones too
+    # The rendered line of every failing run with no per-source detail, also those the budget cut from the text.
+    unexplained_runs: list[str] = field(default_factory=list)
 
 
 def is_bad(row: RunRow | SourceRunRow) -> bool:
@@ -103,7 +112,7 @@ def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: in
     skipped = 0
     for (run_id, command), codes in cleared.items():
         head = (
-            f"Degraded run {_clean(run_id)} ({_cut(_clean(command), max_chars)}): "
+            f"Degraded run {clean(run_id)} ({_cut(clean(command), max_chars)}): "
             "no signal of their own, not flagged for it: "
         )
         names = _names(sorted(codes), max(share - len(head), 0))
@@ -118,7 +127,7 @@ def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: in
     return lines
 
 
-def _clean(value: Any) -> str:
+def clean(value: Any) -> str:
     """One-line, delimiter-safe rendering of an input-derived value."""
     text = value if isinstance(value, str) else str(value)
     return " ".join(text.replace("<", "‹").split())
@@ -132,7 +141,7 @@ def _cut(text: str, max_chars: int) -> str:
 
 def _names(codes: list[str], budget: int) -> str:
     """Whole names joined within ``budget`` characters; the rest is counted, never cut mid-name."""
-    names = [_clean(c) for c in codes]
+    names = [clean(c) for c in codes]
     full = ", ".join(names)
     if len(full) <= budget:
         return full
@@ -197,7 +206,7 @@ def _source_state(
     for row in tonight:
         for sample in row.error_samples:
             if len(samples) < settings.error_samples_per_source:
-                samples.append(_cut(_clean(sample), settings.error_sample_max_chars))
+                samples.append(_cut(clean(sample), settings.error_sample_max_chars))
     corpus = next((r.corpus for r in tonight if r.corpus), corpus_hint)
     state = SourceState(
         source_code=code,
@@ -243,29 +252,29 @@ def _source_state(
 
 def _block(state: SourceState, max_chars: int) -> str:
     lines = [
-        f"[{_clean(state.source_code)}] corpus={_clean(state.corpus or '-')} flags={','.join(state.flags)}",
-        f"  tonight: seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
+        f"[{clean(state.source_code)}] corpus={clean(state.corpus or '-')} flags={','.join(state.flags)}",
+        f"{TONIGHT_PREFIX} seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
         f"fetch_errors={state.fetch_errors} bad_content={state.bad_content} "
         f"truncated={'yes' if state.truncated else 'no'}",
-        f"  history: median_seen={_fmt(state.median_docs_seen)} over {state.history_nights} nights; "
+        f"{HISTORY_PREFIX} median_seen={_fmt(state.median_docs_seen)} over {state.history_nights} nights; "
         f"consecutive_failed_nights={state.consecutive_failed_nights}",
-        f"  days_late={_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
+        f"{DAYS_LATE_PREFIX}{_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
     ]
     if state.failed_commands:
-        commands = dict.fromkeys(_cut(_clean(c), max_chars) for c in state.failed_commands)
-        lines.append("  failed_commands: " + _names(list(commands), max_chars + 20))
-    lines += [f"  sample: {s}" for s in state.error_samples]
+        commands = dict.fromkeys(_cut(clean(c), max_chars) for c in state.failed_commands)
+        lines.append(f"{FAILED_COMMANDS_PREFIX} " + _names(list(commands), max_chars + 20))
+    lines += [f"{SAMPLE_PREFIX} {s}" for s in state.error_samples]
     return "\n".join(lines) + "\n"
 
 
 def _failing_label(run: RunRow, has_detail: bool) -> str:
-    return _clean(run.run_id) if has_detail else _clean(run.run_id) + NO_DETAIL_SUFFIX
+    return clean(run.run_id) if has_detail else clean(run.run_id) + NO_DETAIL_SUFFIX
 
 
 def _run_line(run: RunRow, has_detail: bool, max_chars: int) -> str:
     return (
-        f"{_failing_label(run, has_detail)}: {_cut(_clean(run.tool), max_chars)} {_cut(_clean(run.command), max_chars)} "
-        f"outcome={_clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
+        f"{_failing_label(run, has_detail)}: {_cut(clean(run.tool), max_chars)} {_cut(clean(run.command), max_chars)} "
+        f"outcome={clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
     )
 
 
@@ -399,4 +408,15 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
             text += block
     if omitted:
         text += _omitted_line(omitted, budget - len(text))
-    return NightSummary(text=text, unusual=unusual, normal_count=normal_count, failing_runs=failing_runs, no_run=no_run)
+    return NightSummary(
+        text=text,
+        unusual=unusual,
+        normal_count=normal_count,
+        failing_runs=failing_runs,
+        no_run=no_run,
+        blocks={s.source_code: _block(s, settings.error_sample_max_chars) for s in unusual_states},
+        # Sorted, so the evidence of the finding never depends on the order the rows came in.
+        unexplained_runs=sorted(
+            _run_line(r, False, settings.error_sample_max_chars) for r in failing if r.run_id not in run_ids_with_detail
+        ),
+    )

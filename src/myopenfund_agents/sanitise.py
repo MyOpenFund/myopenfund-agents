@@ -226,3 +226,30 @@ def redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
         path, _, reason = item.rpartition(": ")
         out.append(f"{'<redacted path>' if violations(path, deny) else path}: {reason}")
     return out
+
+
+def withheld(text: str, deny: DenyList) -> str:
+    """The text, or a marker naming the reasons when it carries an infra detail."""
+    reasons = violations(text, deny)
+    return f"withheld ({', '.join(reasons)})" if reasons else text
+
+
+def error_text(exc: BaseException, deny: DenyList, max_chars: int | None = None) -> str:
+    """The error text cut to ``max_chars``, or a withheld marker (cut too) when it carries an infra detail.
+
+    The full text is scanned, so a detail the cut would hide half of is caught, and so is the cut one, which may
+    read as a detail the full text was not ("/srv/data" in "/srv/database"). The result is always clean.
+    Never raises: an exception whose text cannot be read gives its type name."""
+    name = type(exc).__name__
+    try:
+        text = str(exc)
+        reasons = violations(text, deny)
+    except Exception:  # noqa: BLE001 - a hostile __str__ must not break the caller; the type name says enough
+        text, reasons = name, violations(name, deny)
+    reasons = reasons or violations(text[:max_chars], deny)
+    if not reasons:
+        return text[:max_chars]
+    for marker in (f"{name}: withheld ({', '.join(reasons)})", "withheld"):
+        if not violations(marker[:max_chars], deny):
+            return marker[:max_chars]
+    return ""

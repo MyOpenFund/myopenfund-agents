@@ -8,8 +8,9 @@ from myopenfund_agents.core.inputs import OpenIssue
 from myopenfund_agents.settings import A1Settings
 
 AGENT = "a1"
-_NOT_GROUPED = {Category.GENERAL_OUTAGE, Category.CADENCE_OVERDUE}
-_RANK = {Severity.INFO: 0, Severity.WARN: 1, Severity.ERROR: 2}
+# `unknown` says nothing of the cause: many of them are not one problem (the detector groups the crashed sources).
+_NOT_GROUPED = {Category.GENERAL_OUTAGE, Category.CADENCE_OVERDUE, Category.UNKNOWN}
+SEVERITY_RANK = {Severity.INFO: 0, Severity.WARN: 1, Severity.ERROR: 2}
 
 
 class Kind(StrEnum):
@@ -54,7 +55,7 @@ def group_outages(findings: Findings, settings: A1Settings) -> Findings:
     for f in findings.findings:
         if f.source_code != "*" and f.category in grouped:
             if not placed:
-                out.append(_outage(all_codes))
+                out.append(outage(all_codes))
                 placed = True
         elif f.category == Category.GENERAL_OUTAGE:
             if not placed:
@@ -65,7 +66,7 @@ def group_outages(findings: Findings, settings: A1Settings) -> Findings:
     return Findings(findings=out)
 
 
-def _outage(codes: list[str]) -> Finding:
+def outage(codes: list[str]) -> Finding:
     evidence = f"sources: {', '.join(codes)}"
     return Finding(
         source_code="*",
@@ -116,7 +117,7 @@ def plan_actions(
 
 
 def _summary(news: list[Action], default_repo: str) -> Action:
-    severity = max((a.finding.severity for a in news), key=_RANK.__getitem__)
+    severity = max((a.finding.severity for a in news), key=SEVERITY_RANK.__getitem__)
     lines: list[str] = []
     size = 0
     for a in news:

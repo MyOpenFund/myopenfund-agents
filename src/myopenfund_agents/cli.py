@@ -9,8 +9,8 @@ from pathlib import Path
 
 from myopenfund_agents.bench.capture import CaptureError, capture_night, mcp_caller
 from myopenfund_agents.bench.fixtures import Expected, Meta, Night, load, save
-from myopenfund_agents.bench.runner import run_bench, write_report
-from myopenfund_agents.bench.score import load_thresholds
+from myopenfund_agents.bench.runner import fmt, mismatch_lines, run_bench, verdict_texts, write_report
+from myopenfund_agents.bench.score import BenchConfigError, load_thresholds, reported
 from myopenfund_agents.bench.traps import load_traps
 from myopenfund_agents.engines.base import EngineError
 from myopenfund_agents.engines.factory import engine_from_env
@@ -174,10 +174,19 @@ def _run(args: argparse.Namespace) -> int:
     if not nights:
         _err(f"no night selected in {args.nights}")
         return EXIT_CONFIG
-    scores, verdict_list = run_bench(nights, engine, settings, args.repeat, thresholds, corpus_repos, deny)
+    try:
+        scores, verdict_list = run_bench(nights, engine, settings, args.repeat, thresholds, corpus_repos, deny)
+    except BenchConfigError as exc:
+        _err(str(exc))
+        return EXIT_CONFIG
     # Verdicts first: a refused report must not cost the results.
     for v in verdict_list:
-        print(f"{'PASS' if v.passed else 'FAIL'} {v.criterion}: {v.value:g} (threshold {v.threshold:g})")
+        value, threshold = verdict_texts(v)
+        print(f"{'PASS' if v.passed else 'FAIL'} {v.criterion}: {value} (threshold {threshold})")
+    for line in mismatch_lines(scores, deny):
+        print(line)
+    for name, value in reported(scores).items():
+        print(f"INFO {name}: {fmt(name, value)}")
     passed = all(v.passed for v in verdict_list)
     try:
         md = write_report(

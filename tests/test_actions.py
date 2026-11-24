@@ -124,3 +124,10 @@ def test_no_run_finding_comments_on_open_no_run_issue():
 def test_unknown_star_keeps_its_fingerprint_without_no_run():
     fs = Findings(findings=[_f("*", Category.UNKNOWN, Severity.ERROR)])
     assert plan_actions(fs, [], {}, "d", S)[0].fingerprint == "a1:d:*:unknown"
+
+
+def test_unknown_findings_are_never_grouped():
+    fs = Findings(findings=[_f(f"s{i}", Category.UNKNOWN) for i in range(8)])
+    assert group_outages(fs, S) == fs
+    st = A1Settings(max_new_issues_per_run=8)
+    assert [a.finding for a in plan_actions(fs, [], {}, "d", st)] == fs.findings
