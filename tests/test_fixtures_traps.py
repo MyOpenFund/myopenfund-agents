@@ -187,3 +187,95 @@ def test_no_run_trap_on_base_with_open_chronic_issue(green_history):
     base.open_issues.append(OpenIssue(fingerprint="a1:data-orchestrator:*:unknown", number=3, repo="r"))
     t = traps.no_run(base)
     assert [(a.kind, a.source_code, a.category) for a in t.expected.actions] == [("new_issue", "*", "unknown")]
+
+
+def _shared_base(green_history):
+    """us, fr and se share one run, as the real corpus commands do."""
+    rows = [src_run(c, seen=s, run_id="shared") for c, s in (("us", 150), ("fr", 10), ("se", 10))]
+    done = rows[0].finished_at
+    run = RunRow(run_id="shared", tool="harvester", command="repec", outcome="ok", exit_code=0, finished_at=done)
+    return night(source_runs=rows, runs=[run], history=green_history)
+
+
+def test_chronic_sequence(green_history):
+    base = _shared_base(green_history)
+    before = base.model_copy(deep=True)
+    seq = traps.chronic(base, "se", "central-bank-corpus")
+    assert base == before
+    assert [n.inputs.night_id for n in seq] == [f"{base.night_id}--chronic-se-{k}" for k in (1, 2, 3)]
+    assert [[a.kind for a in n.expected.actions] for n in seq] == [["new_issue"], ["comment"], ["comment"]]
+    assert [len(n.inputs.open_issues) for n in seq] == [0, 1, 1]
+    for k, n in enumerate(seq):
+        assert n.expected.keys() == {("se", "source_site_down")}
+        assert n.meta.origin == "trap" and n.meta.base_night == base.night_id
+        s = _summary(n.inputs)
+        assert set(s.unusual) == {"se"}  # the siblings of the shared degraded run stay unflagged
+        assert s.unusual["se"].consecutive_failed_nights == k
+        assert {"failed_run", "fetch_errors"} <= set(s.unusual["se"].flags)
+        assert "volume_drop" not in s.unusual["se"].flags
+        assert s.failing_runs
+
+
+def test_chronic_refuses_what_it_cannot_carry(green_history):
+    with pytest.raises(ValueError, match="no run in night"):
+        traps.chronic(_shared_base(green_history), "zz", "r")
+    with pytest.raises(ValueError, match="history"):
+        traps.chronic(_shared_base([r for r in green_history if r.finished_at < green_history[0].finished_at]), "se", "r")
+    noisy = _shared_base(green_history)
+    noisy.source_runs[0].fetch_errors = 2
+    with pytest.raises(ValueError, match="other"):
+        traps.chronic(noisy, "se", "r")
+
+
+def test_chronic_refuses_an_issue_already_open(green_history):
+    base = _shared_base(green_history)
+    base.open_issues.append(OpenIssue(fingerprint="a1:r:se:source_site_down", number=1, repo="r"))
+    seq_fp = traps.chronic(_shared_base(green_history), "se", "r")[1].inputs.open_issues[0].fingerprint
+    base.open_issues[0].fingerprint = seq_fp
+    with pytest.raises(ValueError, match="already"):
+        traps.chronic(base, "se", "r")
+
+
+def test_summary_never_shows_the_trap_name(green_history):
+    """The night id of a trap names its answer: the model must not read it."""
+    base = _shared_base(green_history)
+    made = [traps.volume_drop(base, "us"), traps.bad_content(base, "fr"), traps.no_run(base)]
+    made += [traps.new_source(base), traps.known_problem(base, "se", "r"), traps.general_outage(_wide_base())]
+    made += traps.chronic(base, "se", "r")
+    for n in made:
+        text = _summary(n.inputs).text
+        assert text.startswith(f"Night {base.night_id}: ")
+        assert "--" not in text
+
+
+@pytest.mark.parametrize("make", [traps.bad_content, lambda b, c: traps.known_problem(b, c, "r")])
+def test_content_traps_look_like_a_real_degraded_run(green_history, make):
+    """A source with two commands is damaged once, and its run is degraded for every source it shares."""
+    base = _shared_base(green_history)
+    base.source_runs.append(src_run("se", seen=0, run_id="other", command="discover"))
+    s = _summary(make(base, "se").inputs)
+    assert s.unusual["se"].bad_content == 2
+    assert set(s.unusual) == {"se"}
+    assert len(s.failing_runs) == 1
+
+
+def test_content_trap_refuses_a_count_that_raises_no_signal(green_history):
+    with pytest.raises(ValueError, match="bad_content"):
+        traps.bad_content(_shared_base(green_history), "se", count=0)
+    with pytest.raises(ValueError, match="bad_content"):
+        traps.known_problem(_shared_base(green_history), "se", "r", count=0)
+
+
+def test_chronic_refuses_a_base_with_a_failing_run(green_history):
+    base = _shared_base(green_history)
+    done = base.runs[0].finished_at
+    base.runs.append(RunRow(run_id="c", tool="t", command="c", outcome="failed", exit_code=1, finished_at=done))
+    with pytest.raises(ValueError, match="failing run"):
+        traps.chronic(base, "se", "r")
+
+
+def test_chronic_damages_one_command_only(green_history):
+    base = _shared_base(green_history)
+    base.source_runs.append(src_run("se", seen=0, run_id="other", command="discover"))
+    for n in traps.chronic(base, "se", "r"):
+        assert _summary(n.inputs).unusual["se"].fetch_errors == 1

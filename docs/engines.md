@@ -70,8 +70,9 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `MIN_HISTORY_NIGHTS` | 5 | history nights needed before a volume drop is judged |
 | `CADENCE_GRACE_DAYS` | 0 | days of lateness tolerated before cadence is flagged |
 | `CADENCE_NEW_MAX_DAYS` | 14 | a series later than this is long overdue: counted in one line, never flagged (0 = no upper bound) |
-| `SUMMARY_CHAR_BUDGET` | 12000 | maximum summary size sent to the model |
+| `SUMMARY_CHAR_BUDGET` | 12000 | maximum summary size sent to the model (below about 1000 the fixed header lines alone can exceed it) |
 | `NOTE_CHAR_BUDGET` | 2000 | characters for the degraded-run and the long-overdue lines, each group at most half of it, never over half the summary budget |
+| `FAILING_RUNS_CHAR_BUDGET` | 3000 | characters for the failing-run lines, never over a quarter of the summary budget; the rest is counted |
 | `ERROR_SAMPLE_MAX_CHARS` | 300 | maximum length of one error sample |
 | `ERROR_SAMPLES_PER_SOURCE` | 3 | error samples kept per source |
 | `GENERAL_OUTAGE_MIN_SOURCES` | 5 | more failing sources than this are grouped as one general outage |
@@ -135,7 +136,8 @@ night has no expected answer yet: fill and validate `expected.json` and set
 ### Traps
 
 A trap damages a green night in one known way and states exactly what A1 must report
-(`myopenfund_agents.bench.traps`); each one checks that the damaged night really carries its signal.
+(`myopenfund_agents.bench.traps`). Traps are not stored: `bench/nights/traps.toml` names the base night and
+the traps, and the bench rebuilds them; each one checks that the damaged night really carries its signal.
 
 | Trap | Damage | Expected finding | Expected action |
 |---|---|---|---|
@@ -145,6 +147,7 @@ A trap damages a green night in one known way and states exactly what A1 must re
 | `new_source` | a new source appears with zero documents | none | none |
 | `known_problem` | unreadable PDFs on a source with an open issue | `(<source>, unreadable_pdf)` | `comment` |
 | `no_run` | no run and no source run tonight: the scheduler did not fire | `(*, unknown)` | `new_issue` |
+| `chronic` | one source fails on three consecutive nights (three nights made) | `(<source>, source_site_down)` each night | `new_issue`, then `comment` twice |
 
 `no_run` is an addition to the spec's trap list (approved 2026-11-23). The instructions tell the model to
 report one `(*, unknown)` error finding for the missing run when the summary says

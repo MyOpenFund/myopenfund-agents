@@ -4,15 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from myopenfund_agents.bench.fixtures import Night, load_all
+from myopenfund_agents.bench.fixtures import Night
 from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, run_night
+from myopenfund_agents.bench.traps import load_bench
 from myopenfund_agents.core.findings import Finding, Findings, Severity
 from myopenfund_agents.engines.fake import FakeEngine
 from myopenfund_agents.sanitise import DenyList, check_tree
 from myopenfund_agents.settings import A1Settings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-NIGHTS = load_all(REPO_ROOT / "bench" / "nights")
+NIGHTS = load_bench(REPO_ROOT / "bench" / "nights")
 IDS = [n.inputs.night_id for n in NIGHTS]
 
 

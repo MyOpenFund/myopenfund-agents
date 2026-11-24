@@ -23,6 +23,7 @@ class A1Settings:
     cadence_new_max_days: int = 14  # later than this = long overdue, one count line only; 0 = no upper bound
     summary_char_budget: int = 12000
     note_char_budget: int = 2000  # degraded-run and long-overdue lines together, at most half the summary
+    failing_runs_char_budget: int = 3000  # failing-run lines, at most a quarter of the summary
     error_sample_max_chars: int = 300
     error_samples_per_source: int = 3
     general_outage_min_sources: int = 5

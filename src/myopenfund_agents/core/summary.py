@@ -91,17 +91,24 @@ def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: in
         if is_bad(r) and id(r) not in implicated:
             cleared[r.run_id, r.command].add(r.source_code)
     lines: list[str] = []
-    used = 0
+    overflow = f"... and {len(cleared)} more degraded runs with sources not flagged"
+    room = budget - len(overflow) - 1
+    share = max(room // 2, 0)  # one huge run never takes the whole room from the next ones
+    skipped = 0
     for (run_id, command), codes in cleared.items():
-        line = (
+        head = (
             f"Degraded run {_clean(run_id)} ({_cut(_clean(command), max_chars)}): "
-            f"no signal of their own, not flagged for it: {', '.join(_clean(c) for c in sorted(codes))}"
+            "no signal of their own, not flagged for it: "
         )
-        if used + len(line) + 1 > budget:
-            lines.append(f"... and {len(cleared) - len(lines)} more degraded runs with sources not flagged")
-            break
+        names = _names(sorted(codes), max(share - len(head), 0))
+        line = head + names
+        if len(line) + 1 > room or names.startswith("(+"):
+            skipped += 1
+            continue
         lines.append(line)
-        used += len(line) + 1
+        room -= len(line) + 1
+    if skipped:
+        lines.append(f"... and {skipped} more degraded runs with sources not flagged")
     return lines
 
 
@@ -115,6 +122,23 @@ def _cut(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max(max_chars - 1, 0)] + "…"
+
+
+def _names(codes: list[str], budget: int) -> str:
+    """Whole names joined within ``budget`` characters; the rest is counted, never cut mid-name."""
+    names = [_clean(c) for c in codes]
+    full = ", ".join(names)
+    if len(full) <= budget:
+        return full
+    room = budget - len(f" (+{len(names)} more)")
+    kept: list[str] = []
+    used = 0
+    for name in names:
+        size = len(name) + (2 if kept else 0)
+        if used + size <= room:
+            kept.append(name)
+            used += size
+    return f"{', '.join(kept)} (+{len(names) - len(kept)} more)".lstrip()
 
 
 def _count(value: Any) -> int:
@@ -222,7 +246,8 @@ def _block(state: SourceState, max_chars: int) -> str:
         f"  days_late={_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
     ]
     if state.failed_commands:
-        lines.append("  failed_commands: " + "; ".join(_cut(_clean(c), max_chars) for c in state.failed_commands))
+        commands = dict.fromkeys(_cut(_clean(c), max_chars) for c in state.failed_commands)
+        lines.append("  failed_commands: " + _names(list(commands), max_chars + 20))
     lines += [f"  sample: {s}" for s in state.error_samples]
     return "\n".join(lines) + "\n"
 
@@ -236,6 +261,11 @@ def _run_line(run: RunRow, has_detail: bool, max_chars: int) -> str:
         f"{_failing_label(run, has_detail)}: {_cut(_clean(run.tool), max_chars)} {_cut(_clean(run.command), max_chars)} "
         f"outcome={_clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
     )
+
+
+def _omitted_line(codes: list[str], budget: int) -> str:
+    head = f"\nOmitted for size ({len(codes)} unusual sources): "
+    return f"{head}{_names(codes, max(budget - len(head) - 1, 0))}\n"
 
 
 def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
@@ -295,12 +325,16 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     unusual = {s.source_code: s for s in unusual_states}
     normal_count = len(states) - len(unusual)
 
-    run_ids_with_detail = {r.run_id for r in tonight_rows}
-    failing = [r for r in runs if is_bad(r)]
+    # A run has detail when a flagged source answers for it, not merely when some source row exists.
+    run_ids_with_detail = {r.run_id for r in tonight_rows if id(r) in implicated or _has_own_signal(r)}
+    # Unexplained runs first: the budget may cut the list, and nothing else in the summary shows them.
+    failing = sorted((r for r in runs if is_bad(r)), key=lambda r: r.run_id in run_ids_with_detail)
     failing_runs = [_failing_label(r, r.run_id in run_ids_with_detail) for r in failing]
 
     header = [
-        f"Night {_clean(inputs.night_id)}: {inputs.night_start.isoformat()} to {inputs.night_end.isoformat()}",
+        # The date, not night_id: a trap's id names its answer.
+        f"Night {inputs.night_end.date().isoformat()}: "
+        f"{inputs.night_start.isoformat()} to {inputs.night_end.isoformat()}",
     ]
     no_run = not runs and not tonight_rows
     if no_run:
@@ -320,7 +354,7 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     tail += _cleared_lines(tonight_rows, implicated, settings.error_sample_max_chars, note_budget)
     long_overdue = [c for c in inputs.cadence or [] if _long_overdue(c, settings)]
     if long_overdue:
-        names = _cut(", ".join(_clean(c) for c in sorted({c.source_code for c in long_overdue})), note_budget)
+        names = _names(sorted({c.source_code for c in long_overdue}), max(note_budget - 100, 0))
         tail.append(
             f"Long overdue series (more than {settings.cadence_new_max_days} days late, not findings): "
             f"{len(long_overdue)} ({names})"
@@ -330,27 +364,33 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
         tail.append(f"Open discovery errors without a source: {unattached}")
     if failing:
         header.append("Failing runs:")
-        # Failing runs are listed while the header stays within budget, keeping room for the tail lines.
-        more_room = len(f"... and {len(failing)} more failing runs\n")
-        used = sum(len(line) + 1 for line in header + tail) + more_room
+        # Failing runs keep to their own budget, so the sources that explain them always have room.
+        room = min(settings.failing_runs_char_budget, settings.summary_char_budget // 4)
+        used = len(f"... and {len(failing)} more failing runs, {len(failing)} with no per-source detail\n")
         for listed, run in enumerate(failing):
             line = f"- {_run_line(run, run.run_id in run_ids_with_detail, settings.error_sample_max_chars)}"
-            if used + len(line) + 1 > settings.summary_char_budget:
-                header.append(f"... and {len(failing) - listed} more failing runs")
+            if used + len(line) + 1 > room:
+                bare = sum(1 for r in failing[listed:] if r.run_id not in run_ids_with_detail)
+                note = f", {bare} with no per-source detail" if bare else ""
+                header.append(f"... and {len(failing) - listed} more failing runs{note}")
                 break
             header.append(line)
             used += len(line) + 1
     header += tail
 
     text = "\n".join(header) + "\n"
+    budget = settings.summary_char_budget
     omitted: list[str] = []
-    for state in unusual_states:
+    for i, state in enumerate(unusual_states):
         block = "\n" + _block(state, settings.error_sample_max_chars)
+        # Room stays for naming every source after this one (at most a quarter of the budget).
+        rest = [s.source_code for s in unusual_states[i + 1 :]]
+        reserve = min(len(_omitted_line(rest, budget)), budget // 4) if rest else 0
         # Most important blocks first; once one overflows, it and every later block are omitted.
-        if omitted or len(text) + len(block) > settings.summary_char_budget:
-            omitted.append(_clean(state.source_code))
+        if omitted or len(text) + len(block) + reserve > budget:
+            omitted.append(state.source_code)
         else:
             text += block
     if omitted:
-        text += f"\nOmitted for size ({len(omitted)} unusual sources): {', '.join(omitted)}\n"
+        text += _omitted_line(omitted, budget - len(text))
     return NightSummary(text=text, unusual=unusual, normal_count=normal_count, failing_runs=failing_runs, no_run=no_run)

@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from conftest import END, night, src_run
-from myopenfund_agents.core.inputs import CadenceRow, DiscoveryError, RunRow
+from myopenfund_agents.core.inputs import CadenceRow, DiscoveryError, NightInputs, RunRow
 from myopenfund_agents.core.summary import NightSummary, SourceState, build_summary
 from myopenfund_agents.settings import A1Settings
 
@@ -258,8 +258,10 @@ def test_failing_runs_bounded_by_budget():
     settings = A1Settings(summary_char_budget=2000)
     summary = build_summary(night(runs=runs), settings)
     assert len(summary.failing_runs) == 100
-    assert len(summary.text) < 2000 + 300
-    assert any(line.startswith("... and ") and line.endswith(" more failing runs") for line in summary.text.splitlines())
+    assert len(summary.text) <= 2000
+    listed = sum(line.startswith("- run-") for line in summary.text.splitlines())
+    left = 100 - listed
+    assert f"... and {left} more failing runs, {left} with no per-source detail\n" in summary.text
     assert "y" * 300 not in summary.text
     assert "Sources: 0 normal, 0 unusual" in summary.text
 
@@ -412,3 +414,99 @@ def test_prompt_explains_the_note_lines():
     from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
 
     assert "Degraded run" in A1_INSTRUCTIONS and "Long overdue series" in A1_INSTRUCTIONS
+    assert "more degraded runs with sources not flagged" in A1_INSTRUCTIONS
+    assert "Omitted for size" in A1_INSTRUCTIONS
+
+
+def _degraded_crowd(n: int) -> NightInputs:
+    """n shared degraded runs, each explained by `se`, with their run rows."""
+    rows, runs = [], []
+    for i in range(n):
+        rid = f"run-{i:03d}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        rows += [src_run("se", run_id=rid, outcome="degraded", exit_code=3, fetch_errors=1)]
+        rows += [src_run(f"c{i}", run_id=rid, outcome="degraded", exit_code=3)]
+        runs += [RunRow(run_id=rid, tool="t", command="repec", outcome="degraded", exit_code=3, finished_at=END)]
+    return night(rows, runs=runs)
+
+
+def test_failing_runs_never_push_out_the_findings():
+    for n, budget in ((60, 4000), (200, 12000)):
+        text = build_summary(_degraded_crowd(n), A1Settings(summary_char_budget=budget)).text
+        assert "\n[se] " in text
+        assert "more failing runs" in text
+        assert len(text) <= budget
+
+
+def test_failing_runs_budget_is_a_setting():
+    text = build_summary(_degraded_crowd(20), A1Settings(failing_runs_char_budget=0)).text
+    assert "... and 20 more failing runs" in text
+
+
+def test_total_budget_holds_with_many_flagged_sources():
+    rows = [src_run(f"s{i:03d}-{'x' * 10}", outcome="failed", exit_code=1, fetch_errors=1) for i in range(400)]
+    for budget in (1000, 4000, 12000):
+        text = build_summary(night(rows), A1Settings(summary_char_budget=budget)).text
+        assert len(text) <= budget
+        assert "Omitted for size (" in text
+
+
+def test_omitted_names_are_whole_and_the_rest_is_counted():
+    rows = [src_run(f"s{i:03d}", outcome="failed", exit_code=1, fetch_errors=1) for i in range(400)]
+    text = build_summary(night(rows), A1Settings(summary_char_budget=1000)).text
+    names, _, more = text[text.index("unusual sources): ") + 18 :].strip().rpartition(" (+")
+    total = int(text[text.index("Omitted for size (") + 18 :].split()[0])
+    listed = names.split(", ")
+    assert all(len(x) == 4 and x[0] == "s" for x in listed)
+    assert len(listed) + int(more.split()[0]) == total
+
+
+def test_a_long_degraded_run_keeps_some_cleared_names_and_the_next_line():
+    rows = [src_run("se", run_id="big", outcome="degraded", exit_code=3, command="repec", fetch_errors=1)]
+    big = {"run_id": "big", "outcome": "degraded", "exit_code": 3, "command": "repec"}
+    rows += [src_run(f"cleared{i:04d}", **big) for i in range(200)]
+    rows += [src_run("se", run_id="z", outcome="degraded", exit_code=3, command="repec", fetch_errors=1)]
+    rows += [src_run("nl", run_id="z", outcome="degraded", exit_code=3, command="repec")]
+    text = build_summary(night(rows), A1Settings()).text
+    assert "cleared0000" in text and " more)" in text
+    assert "Degraded run z (repec): no signal of their own, not flagged for it: nl" in text
+
+
+def test_failed_commands_are_listed_once():
+    rows = [src_run("se", run_id=f"r{i}", command="repec", outcome="failed", exit_code=1) for i in range(300)]
+    assert "failed_commands: repec\n" in build_summary(night(rows), A1Settings()).text
+
+
+def test_an_unexplained_crash_is_listed_before_explained_runs():
+    inputs = _degraded_crowd(60)
+    inputs.runs.append(RunRow(run_id="crash", tool="t", command="x", outcome="failed", exit_code=1, finished_at=END))
+    text = build_summary(inputs, A1Settings()).text
+    assert "- crash (no per-source detail" in text
+    tiny = build_summary(inputs, A1Settings(failing_runs_char_budget=0)).text
+    assert "... and 61 more failing runs, 1 with no per-source detail" in tiny
+
+
+def test_failed_run_whose_sources_are_all_fine_is_not_explained():
+    run = RunRow(run_id="x", tool="t", command="c", outcome="failed", exit_code=1, finished_at=END)
+    summary = build_summary(night([src_run("se", run_id="x")], runs=[run]), A1Settings())
+    assert not summary.unusual
+    assert "- x (no per-source detail" in summary.text
+
+
+def test_many_commands_never_push_out_their_own_block():
+    rows = [src_run("se", run_id=f"r{i}", command=f"{i:03d}" + "x" * 297, outcome="failed", exit_code=1)
+            for i in range(45)]  # fmt: skip
+    rows.append(src_run("fr", run_id="f", outcome="failed", exit_code=1))
+    text = build_summary(night(rows), A1Settings()).text
+    assert "\n[se] " in text and "\n[fr] " in text
+
+
+def test_names_after_a_huge_one_are_still_listed():
+    cadence = [CadenceRow(source_code=c, days_late=99) for c in ("a" * 1500, "z0", "z1")]
+    assert "(z0, z1 (+1 more))" in build_summary(night(cadence=cadence), A1Settings()).text
+
+
+def test_prompt_covers_unexplained_runs_and_missing_causes():
+    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS as text
+
+    assert "no per-source detail" in text
+    assert "documents failed without an error sample" in " ".join(text.split())
