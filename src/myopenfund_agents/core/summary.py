@@ -69,6 +69,12 @@ def _has_own_signal(row: SourceRunRow) -> bool:
     return bool(row.truncated or row.fetch_errors or row.docs_failed or _count(row.bad_content) or row.error_samples)
 
 
+def _raises_flag(row: SourceRunRow) -> bool:
+    """The row alone flags its source; an error sample by itself does not."""
+    counters = (row.fetch_errors or 0, row.docs_failed or 0, _count(row.bad_content))
+    return bool(row.truncated) or any(n > 0 for n in counters)
+
+
 def _is_degraded(row: SourceRunRow) -> bool:
     """The run completed with problems (exit 3): only then does a silent row mean its source went fine."""
     return row.outcome == "degraded" and row.exit_code in (DEGRADED_EXIT, None)
@@ -326,7 +332,7 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
     normal_count = len(states) - len(unusual)
 
     # A run has detail when a flagged source answers for it, not merely when some source row exists.
-    run_ids_with_detail = {r.run_id for r in tonight_rows if id(r) in implicated or _has_own_signal(r)}
+    run_ids_with_detail = {r.run_id for r in tonight_rows if id(r) in implicated or _raises_flag(r)}
     # Unexplained runs first: the budget may cut the list, and nothing else in the summary shows them.
     failing = sorted((r for r in runs if is_bad(r)), key=lambda r: r.run_id in run_ids_with_detail)
     failing_runs = [_failing_label(r, r.run_id in run_ids_with_detail) for r in failing]

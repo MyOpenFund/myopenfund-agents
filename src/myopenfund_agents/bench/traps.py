@@ -1,10 +1,12 @@
 """Traps: damage a green night in one known way and state exactly what A1 must then report."""
 
+import re
 import tomllib
 from datetime import timedelta
 from pathlib import Path
 
 from myopenfund_agents.bench.fixtures import Expected, ExpectedAction, Key, Meta, Night, load_all
+from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, repo_of
 from myopenfund_agents.core.actions import fingerprint
 from myopenfund_agents.core.findings import Category, Finding, Severity
 from myopenfund_agents.core.inputs import NightInputs, OpenIssue, SourceRunRow
@@ -123,6 +125,8 @@ def new_source(base: NightInputs, code: str = "zz") -> Night:
         raise ValueError(f"night {base.night_id} has no source run to copy")
     if any(r.source_code == code for r in inputs.source_runs):
         raise ValueError(f"source {code!r} already has a run in night {base.night_id}")
+    if any(r.source_code == code for r in base.history):
+        raise ValueError(f"source {code!r} already runs in the history of night {base.night_id}")
     row = inputs.source_runs[0]
     update = {
         "command": f"harvest {code}",
@@ -242,6 +246,14 @@ _KINDS = {
 }
 
 
+def _valid_arg(name: str, value: object) -> bool:
+    """A recipe may set only plain data: source code, repository and counts."""
+    if name in ("code", "repo"):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]+", value) is not None
+    minimum = {"seen": 0, "count": 1, "issue_number": 1}.get(name)
+    return minimum is not None and type(value) is int and value >= minimum
+
+
 def load_traps(root: Path, nights: list[Night]) -> list[Night]:
     """Trap nights built from ``root/traps.toml`` on one of ``nights``; none without that file."""
     path = root / RECIPES
@@ -251,12 +263,24 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
         spec = tomllib.loads(path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"{RECIPES}: {exc}") from exc
-    base = next((n.inputs for n in nights if n.inputs.night_id == spec.get("base")), None)
-    if base is None:
+    unknown = sorted(set(spec) - {"base", "trap"})
+    if unknown:
+        raise ValueError(f"{RECIPES}: unknown key(s): {', '.join(unknown)}")
+    base_night = next((n for n in nights if n.inputs.night_id == spec.get("base")), None)
+    if base_night is None:
         raise ValueError(f"{RECIPES}: base night {spec.get('base')!r} not found")
+    if base_night.meta.origin != "green":
+        raise ValueError(f"{RECIPES}: base night {spec['base']!r} is not green")
+    base = base_night.inputs
+    unusual = sorted(build_summary(base, A1Settings()).unusual)
+    if unusual:
+        raise ValueError(f"{RECIPES}: base night {spec['base']!r} has unusual sources: {', '.join(unusual)}")
+    repos = repo_of(base_night, DEFAULT_CORPUS_REPOS)
     recipes = spec.get("trap", [])
     if not isinstance(recipes, list) or not all(isinstance(r, dict) for r in recipes):
         raise ValueError(f"{RECIPES}: 'trap' must be a list of tables")
+    if not recipes:
+        raise ValueError(f"{RECIPES}: no trap")
     made: dict[str, Night] = {}
     for recipe in recipes:
         args = dict(recipe)
@@ -264,9 +288,15 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
         build = _KINDS.get(kind) if isinstance(kind, str) else None
         if build is None:
             raise ValueError(f"{RECIPES}: unknown trap kind {kind!r}")
+        for name, value in args.items():
+            if not _valid_arg(name, value):
+                raise ValueError(f"{RECIPES}: {kind}: invalid {name} = {value!r}")
+        planned = repos.get(args.get("code"))
+        if "repo" in args and planned is not None and args["repo"] != planned:
+            raise ValueError(f"{RECIPES}: {kind}: repo {args['repo']!r}, but the planner uses {planned!r}")
         try:
             result = build(base, **args)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError(f"{RECIPES}: {kind}: {exc}") from exc
         for night in result if isinstance(result, list) else [result]:
             if night.inputs.night_id in made:

@@ -111,6 +111,21 @@ def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _input_tokens(usage: dict[str, Any]) -> int | None:
+    """Every input token; the CLI reports cached prompt tokens apart from `input_tokens`."""
+    base = _int_or_none(usage.get("input_tokens"))
+    if base is None:
+        return None
+    cached = ("cache_creation_input_tokens", "cache_read_input_tokens")
+    return base + sum(_int_or_none(usage.get(name)) or 0 for name in cached)
+
+
+def _model_used(data: dict[str, Any], configured: str) -> str:
+    """The model(s) the CLI says answered, so a report never says only `default`."""
+    used = data.get("modelUsage")
+    return "+".join(sorted(used)) if isinstance(used, dict) and used else configured
+
+
 class ClaudeCodeEngine:
     name = "claude-code"
 
@@ -187,15 +202,16 @@ class ClaudeCodeEngine:
             if completed.returncode != 0:
                 reason = f"exit code {completed.returncode}" + (f"; stderr: {stderr}" if stderr else "")
                 continue
-            usage = json.loads(stdout).get("usage")
+            data = _envelope(stdout)
+            usage = data.get("usage")
             usage = usage if isinstance(usage, dict) else {}
             return EngineResult(
                 findings=findings,
                 engine=self.name,
-                model=self.model,
+                model=_model_used(data, self.model),
                 seconds=time.monotonic() - start,
                 retries=attempt,
-                input_tokens=_int_or_none(usage.get("input_tokens")),
+                input_tokens=_input_tokens(usage),
                 output_tokens=_int_or_none(usage.get("output_tokens")),
             )
         raise self._fail(f"no valid findings after {attempts} attempts; last failure: {reason}")

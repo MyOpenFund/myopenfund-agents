@@ -42,7 +42,7 @@ def test_night_file_has_one_row_per_line(tmp_path, green_history):
 def test_load_bench_builds_the_traps(tmp_path, green_history):
     base = _save_base(tmp_path, green_history)
     _recipe(tmp_path, base, '[[trap]]', 'kind = "volume_drop"', 'code = "us"',
-            '[[trap]]', 'kind = "chronic"', 'code = "se"', 'repo = "r"')  # fmt: skip
+            '[[trap]]', 'kind = "chronic"', 'code = "se"', 'repo = "central-bank-corpus"')  # fmt: skip
     i = base.inputs.night_id
     expected = [i, f"{i}--chronic-se-1", f"{i}--chronic-se-2", f"{i}--chronic-se-3", f"{i}--volume-drop-us"]
     assert [n.inputs.night_id for n in load_bench(tmp_path)] == expected
@@ -85,3 +85,66 @@ def test_cli_reports_a_bad_recipe_as_configuration_error(tmp_path, green_history
     monkeypatch.setattr("myopenfund_agents.cli.engine_from_env", lambda settings: FakeEngine(Findings(findings=[])))
     assert main(["bench-run", "--profile", "local", "--nights", str(tmp_path)]) == 2
     assert "unknown trap kind" in capsys.readouterr().err
+
+
+def test_base_must_be_green(tmp_path, green_history):
+    base = _save_base(tmp_path, green_history)
+    d = tmp_path / base.inputs.night_id
+    save(base.model_copy(update={"meta": base.meta.model_copy(update={"origin": "incident"})}), tmp_path)
+    assert d.is_dir()
+    _recipe(tmp_path, base, "[[trap]]", 'kind = "new_source"')
+    with pytest.raises(ValueError, match="green"):
+        load_bench(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["[[traps]]", 'kind = "no_run"'],
+        ["[[trap]]", 'kind = "no_run"', 'settings = "x"'],
+        ["[[trap]]", 'kind = "new_source"', "code = 5"],
+        ["[[trap]]", 'kind = "new_source"', 'code = ""'],
+        ["[[trap]]", 'kind = "new_source"', 'code = "a/b"'],
+        ["[[trap]]", 'kind = "volume_drop"', 'code = "us"', "seen = -5"],
+        ["[[trap]]", 'kind = "bad_content"', 'code = "fr"', "count = [1]"],
+        ["[[trap]]", 'kind = "bad_content"', 'code = "fr"', "count = true"],
+        ["[[trap]]", 'kind = "chronic"', 'code = "se"', "repo = 3"],
+        ["[[trap]]", 'kind = "bad_content"', 'code = "zz"'],
+        ["[[trap]]", 'kind = "bad_content"'],
+    ],
+)
+def test_bad_recipe_errors_name_the_file(tmp_path, green_history, lines):
+    _recipe(tmp_path, _save_base(tmp_path, green_history), *lines)
+    with pytest.raises(ValueError, match=r"^traps\.toml: "):
+        load_bench(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["known_problem", "chronic"])
+def test_recipe_repo_must_be_the_one_the_planner_uses(tmp_path, green_history, kind):
+    _recipe(tmp_path, _save_base(tmp_path, green_history), "[[trap]]", f'kind = "{kind}"', 'code = "se"', 'repo = "typo"')
+    with pytest.raises(ValueError, match=r"^traps\.toml: .*typo.*central-bank-corpus"):
+        load_bench(tmp_path)
+
+
+def test_base_must_show_no_unusual_source(tmp_path, green_history):
+    base = _save_base(tmp_path, green_history)
+    base.inputs.source_runs[0].fetch_errors = 3
+    save(base, tmp_path)
+    _recipe(tmp_path, base, "[[trap]]", 'kind = "bad_content"', 'code = "fr"')
+    with pytest.raises(ValueError, match=r"^traps\.toml: .*unusual"):
+        load_bench(tmp_path)
+
+
+def test_new_source_must_be_new_in_history_too(tmp_path, green_history):
+    base = _save_base(tmp_path, green_history)
+    base.inputs.source_runs = [r for r in base.inputs.source_runs if r.source_code != "us"]
+    save(base, tmp_path)
+    _recipe(tmp_path, base, "[[trap]]", 'kind = "new_source"', 'code = "us"')
+    with pytest.raises(ValueError, match=r"^traps\.toml: .*history"):
+        load_bench(tmp_path)
+
+
+def test_recipe_file_without_trap_is_refused(tmp_path, green_history):
+    _recipe(tmp_path, _save_base(tmp_path, green_history))
+    with pytest.raises(ValueError, match=r"^traps\.toml: no trap"):
+        load_bench(tmp_path)

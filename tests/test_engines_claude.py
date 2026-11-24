@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -287,3 +288,37 @@ def test_claude_timeout_from_settings_unless_explicit():
 def test_factory_claude_code_uses_timeout_setting():
     built = engine_from_env(A1Settings(engine_timeout_s=42.0), {**ENV, "MOF_AGENTS_ENGINE": "claude-code"})
     assert built._timeout_s == 42.0
+
+
+def test_real_envelope_names_the_model_and_counts_cached_input():
+    """A real `claude -p` output (ids replaced): cached prompt tokens are input too, and `default` is resolved."""
+    raw = (Path(__file__).parent / "data" / "claude_output.json").read_text(encoding="utf-8")
+    result = engine(FakeRunner((0, raw))).diagnose("s")
+    assert result.findings.keys() == {("se", "source_site_down")}
+    assert result.model == "claude-sonnet-5-5"
+    assert (result.input_tokens, result.output_tokens) == (2570, 378)
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"cache_read_input_tokens": 5}, None),
+        ({"input_tokens": 1, "cache_read_input_tokens": 5}, 6),
+        ({"input_tokens": 1, "cache_creation_input_tokens": "x"}, 1),
+        ({"input_tokens": 1, "cache_creation_input_tokens": True}, 1),
+    ],
+)
+def test_input_tokens_with_partial_usage(usage, expected):
+    runner = FakeRunner((0, envelope(structured_output=GOOD, usage=usage)))
+    assert engine(runner).diagnose("s").input_tokens == expected
+
+
+@pytest.mark.parametrize("used", [None, {}, [], "x"])
+def test_model_falls_back_to_the_configured_one(used):
+    runner = FakeRunner((0, envelope(structured_output=GOOD, modelUsage=used)))
+    assert engine(runner).diagnose("s").model == "default"
+
+
+def test_several_models_are_all_named():
+    runner = FakeRunner((0, envelope(structured_output=GOOD, modelUsage={"b": {}, "a": {}})))
+    assert engine(runner).diagnose("s").model == "a+b"

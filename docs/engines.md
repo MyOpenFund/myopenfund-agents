@@ -50,7 +50,8 @@ unset ANTHROPIC_API_KEY
 The engine runs the `claude` CLI with no tools and no MCP server. It refuses to start when
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` is set
 (any of them would bill an API account instead of the subscription), and when `CLAUDE_CODE_OAUTH_TOKEN`
-is missing.
+is missing. Your own hooks, plugins and user `CLAUDE.md` still load: point `CLAUDE_CONFIG_DIR` at an empty
+directory to keep them out of A1. Reports name the model that answered, also when none is configured.
 
 > A subscription is for your **own, individual use**: run this engine on your own machine for your own
 > instance only. Do not share a token, put it in CI, or serve other people with it; use an API key for that.
@@ -159,6 +160,9 @@ carries an open `*:no_run` issue, or that still shows unusual sources once its r
 (discovery errors or overdue cadence), so those two situations are not measured.
 
 ### Run the bench
+
+CI runs no model on pull requests; the `Local model` workflow is a manual smoke test. Run the bench on your own
+machine before changing a model or the prompt.
 
 Run the bench with the configured engine:
 

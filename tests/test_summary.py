@@ -510,3 +510,25 @@ def test_prompt_covers_unexplained_runs_and_missing_causes():
 
     assert "no per-source detail" in text
     assert "documents failed without an error sample" in " ".join(text.split())
+
+
+def test_failed_run_explained_by_no_flagged_source_stays_unexplained():
+    """An ok row with only an error sample raises no flag, so it cannot explain its failed run."""
+    run = RunRow(run_id="x", tool="t", command="c", outcome="failed", exit_code=1, finished_at=END)
+    summary = build_summary(night([src_run("se", run_id="x", error_samples=["boom"])], runs=[run]), A1Settings())
+    assert not summary.unusual
+    assert "- x (no per-source detail" in summary.text
+
+
+def test_prompt_puts_unexplained_runs_under_a_general_outage():
+    from myopenfund_agents.core.prompt import A1_INSTRUCTIONS
+
+    rule = " ".join(A1_INSTRUCTIONS.split())
+    assert "a general outage covers such runs, unless the summary shows a different cause for them" in rule
+
+
+def test_negative_counters_never_explain_a_failed_run():
+    run = RunRow(run_id="x", tool="t", command="c", outcome="failed", exit_code=1, finished_at=END)
+    for kw in ({"fetch_errors": -1}, {"bad_content": -2}, {"docs_failed": -1}):
+        text = build_summary(night([src_run("se", run_id="x", **kw)], runs=[run]), A1Settings()).text
+        assert "- x (no per-source detail" in text

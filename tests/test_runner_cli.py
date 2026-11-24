@@ -446,3 +446,26 @@ def test_run_night_no_run_does_not_comment_on_chronic_issue(green_history):
     score = run_night(n, FakeEngine(Findings(findings=[finding])), A1Settings(), 1, None)
     assert score.attempts[0].actions == [("new_issue", "*", "unknown")]
     assert score.actions_ok
+
+
+def test_report_names_the_models_that_answered(tmp_path):
+    from conftest import night, src_run
+    from myopenfund_agents.bench.fixtures import Expected, Meta, Night
+    from myopenfund_agents.bench.runner import run_night, write_report
+    from myopenfund_agents.engines.base import EngineResult
+    from myopenfund_agents.sanitise import DenyList
+
+    class Resolving:
+        name, model = "claude-code", "default"
+
+        def diagnose(self, text):
+            return EngineResult(Findings(findings=[]), self.name, "real-model", 0.1)
+
+    n = Night(inputs=night([src_run("se")]), expected=Expected(), meta=Meta(origin="green", description="d"))
+    score = run_night(n, Resolving(), A1Settings(), repeat=1, corpus_repos=None)
+    md = write_report(
+        tmp_path, Resolving(), "prod", [score], [], DenyList(), repeat=1, settings=A1Settings(), thresholds={}
+    )
+    payload = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert payload["models_used"] == ["real-model"]
+    assert "Model that answered: real-model" in md.read_text()
