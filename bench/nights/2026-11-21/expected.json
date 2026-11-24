@@ -1,0 +1,42 @@
+{
+  "findings": [
+    {
+      "source_code": "de",
+      "category": "volume_drop"
+    },
+    {
+      "source_code": "ecb",
+      "category": "volume_drop"
+    },
+    {
+      "source_code": "fr",
+      "category": "volume_drop"
+    },
+    {
+      "source_code": "jp",
+      "category": "volume_drop"
+    }
+  ],
+  "actions": [
+    {
+      "kind": "new_issue",
+      "source_code": "de",
+      "category": "volume_drop"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "ecb",
+      "category": "volume_drop"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "fr",
+      "category": "volume_drop"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "jp",
+      "category": "volume_drop"
+    }
+  ]
+}

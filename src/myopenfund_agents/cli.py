@@ -11,6 +11,7 @@ from myopenfund_agents.bench.capture import CaptureError, capture_night, mcp_cal
 from myopenfund_agents.bench.fixtures import Expected, Meta, Night, load, save
 from myopenfund_agents.bench.runner import run_bench, write_report
 from myopenfund_agents.bench.score import load_thresholds
+from myopenfund_agents.bench.traps import load_traps
 from myopenfund_agents.engines.base import EngineError
 from myopenfund_agents.engines.factory import engine_from_env
 from myopenfund_agents.sanitise import DenyList
@@ -75,7 +76,7 @@ def _deny_list() -> DenyList | None:
 
 
 def _load_nights(root: Path) -> list[Night]:
-    """Every night under root (same selection as fixtures.load_all); ValueError names the unreadable night."""
+    """Same selection as traps.load_bench; ValueError names the unreadable night."""
     if not root.is_dir():
         return []
     nights = []
@@ -85,7 +86,7 @@ def _load_nights(root: Path) -> list[Night]:
         except (ValueError, OSError) as exc:
             first = str(exc).splitlines()[0] if str(exc) else ""
             raise ValueError(f"cannot read night {d}: {type(exc).__name__}: {first}") from exc
-    return nights
+    return sorted([*nights, *load_traps(root, nights)], key=lambda n: n.inputs.night_id)
 
 
 def _capture(args: argparse.Namespace) -> int:

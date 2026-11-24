@@ -1,0 +1,24 @@
+{
+  "findings": [
+    {
+      "source_code": "nl",
+      "category": "source_site_down"
+    },
+    {
+      "source_code": "se",
+      "category": "source_site_down"
+    }
+  ],
+  "actions": [
+    {
+      "kind": "new_issue",
+      "source_code": "nl",
+      "category": "source_site_down"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "se",
+      "category": "source_site_down"
+    }
+  ]
+}

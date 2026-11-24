@@ -1,0 +1,15 @@
+{
+  "findings": [
+    {
+      "source_code": "*",
+      "category": "unknown"
+    }
+  ],
+  "actions": [
+    {
+      "kind": "new_issue",
+      "source_code": "*",
+      "category": "unknown"
+    }
+  ]
+}

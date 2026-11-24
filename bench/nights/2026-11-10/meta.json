@@ -1,0 +1,11 @@
+{
+  "origin": "incident",
+  "description": "se listing page answers 404 and the crawl is cut",
+  "base_night": null,
+  "validated_by": "Marc (recommended answers accepted, decision delegated to Claude)",
+  "validated_on": "2026-11-24",
+  "notes": [
+    "discovery errors kept by first_seen_at <= night_end (approximation)",
+    "the expected category is what the summary shows (HTTP errors), not the cause found later"
+  ]
+}

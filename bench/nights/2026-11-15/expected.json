@@ -1,0 +1,33 @@
+{
+  "findings": [
+    {
+      "source_code": "fr",
+      "category": "unknown"
+    },
+    {
+      "source_code": "gb",
+      "category": "unknown"
+    },
+    {
+      "source_code": "jp",
+      "category": "unknown"
+    }
+  ],
+  "actions": [
+    {
+      "kind": "new_issue",
+      "source_code": "fr",
+      "category": "unknown"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "gb",
+      "category": "unknown"
+    },
+    {
+      "kind": "new_issue",
+      "source_code": "jp",
+      "category": "unknown"
+    }
+  ]
+}

@@ -51,6 +51,17 @@ class Night(_Model):
 _PARTS = ("inputs", "expected", "meta")
 
 
+def _by_row(data: dict) -> str:
+    """JSON with one line per list item: a night holds hundreds of rows, and a diff should show rows."""
+
+    def value(v: object) -> str:
+        if not isinstance(v, list) or not v:
+            return json.dumps(v, ensure_ascii=False)
+        return "[\n" + ",\n".join("    " + json.dumps(x, ensure_ascii=False) for x in v) + "\n  ]"
+
+    return "{\n" + ",\n".join(f"  {json.dumps(k)}: {value(v)}" for k, v in data.items()) + "\n}"
+
+
 def save(night: Night, root: Path) -> Path:
     night_id = night.inputs.night_id
     if not night_id or "/" in night_id or "\\" in night_id or night_id in (".", ".."):
@@ -59,7 +70,8 @@ def save(night: Night, root: Path) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     dumped = night.model_dump(mode="json")
     for part in _PARTS:
-        text = json.dumps(dumped[part], indent=2, ensure_ascii=False) + "\n"
+        text = _by_row(dumped[part]) if part == "inputs" else json.dumps(dumped[part], indent=2, ensure_ascii=False)
+        text += "\n"
         (d / f"{part}.json").write_text(text, encoding="utf-8")
     return d
 
