@@ -1,0 +1,11 @@
+{
+  "origin": "incident",
+  "description": "volume drop on four sources",
+  "base_night": null,
+  "validated_by": "Marc (recommended answers accepted, decision delegated to Claude)",
+  "validated_on": "2026-11-24",
+  "notes": [
+    "discovery errors kept by first_seen_at <= night_end (approximation)",
+    "known benign afterwards (duplicates no longer recounted), but the summary alone does not show it: reporting it is the expected answer"
+  ]
+}

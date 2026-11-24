@@ -1,0 +1,29 @@
+# Traps rebuilt from the base night at load time (myopenfund_agents.bench.traps); never stored.
+base = "2026-11-17"
+
+[[trap]]
+kind = "volume_drop"
+code = "gb"
+
+[[trap]]
+kind = "bad_content"
+code = "fr"
+
+[[trap]]
+kind = "general_outage"
+
+[[trap]]
+kind = "new_source"
+
+[[trap]]
+kind = "known_problem"
+code = "de"
+repo = "central-bank-corpus"
+
+[[trap]]
+kind = "no_run"
+
+[[trap]]
+kind = "chronic"
+code = "se"
+repo = "central-bank-corpus"

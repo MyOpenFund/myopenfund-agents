@@ -1,0 +1,10 @@
+{
+  "origin": "green",
+  "description": "every source collected, no failing run",
+  "base_night": null,
+  "validated_by": "Marc (recommended answers accepted, decision delegated to Claude)",
+  "validated_on": "2026-11-24",
+  "notes": [
+    "discovery errors kept by first_seen_at <= night_end (approximation)"
+  ]
+}
