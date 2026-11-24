@@ -30,6 +30,12 @@ NO_DETAIL_SUFFIX = " (no per-source detail: failed before or outside sources)"
 NO_RUN_LINE = "No run finished during this night."
 CADENCE_UNKNOWN_LINE = "Cadence: not known for this night"
 ONE_DAY = timedelta(days=1)
+# Line prefixes of a source block; the detector finds the lines of its evidence by them.
+TONIGHT_PREFIX = "  tonight:"
+HISTORY_PREFIX = "  history:"
+DAYS_LATE_PREFIX = "  days_late="
+FAILED_COMMANDS_PREFIX = "  failed_commands:"
+SAMPLE_PREFIX = "  sample:"
 
 
 @dataclass
@@ -59,6 +65,9 @@ class NightSummary:
     normal_count: int
     failing_runs: list[str]
     no_run: bool = False  # True exactly when the text carries NO_RUN_LINE
+    blocks: dict[str, str] = field(default_factory=dict)  # every unusual source's block, the omitted ones too
+    # The rendered line of every failing run with no per-source detail, also those the budget cut from the text.
+    unexplained_runs: list[str] = field(default_factory=list)
 
 
 def is_bad(row: RunRow | SourceRunRow) -> bool:
@@ -244,17 +253,17 @@ def _source_state(
 def _block(state: SourceState, max_chars: int) -> str:
     lines = [
         f"[{_clean(state.source_code)}] corpus={_clean(state.corpus or '-')} flags={','.join(state.flags)}",
-        f"  tonight: seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
+        f"{TONIGHT_PREFIX} seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
         f"fetch_errors={state.fetch_errors} bad_content={state.bad_content} "
         f"truncated={'yes' if state.truncated else 'no'}",
-        f"  history: median_seen={_fmt(state.median_docs_seen)} over {state.history_nights} nights; "
+        f"{HISTORY_PREFIX} median_seen={_fmt(state.median_docs_seen)} over {state.history_nights} nights; "
         f"consecutive_failed_nights={state.consecutive_failed_nights}",
-        f"  days_late={_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
+        f"{DAYS_LATE_PREFIX}{_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
     ]
     if state.failed_commands:
         commands = dict.fromkeys(_cut(_clean(c), max_chars) for c in state.failed_commands)
-        lines.append("  failed_commands: " + _names(list(commands), max_chars + 20))
-    lines += [f"  sample: {s}" for s in state.error_samples]
+        lines.append(f"{FAILED_COMMANDS_PREFIX} " + _names(list(commands), max_chars + 20))
+    lines += [f"{SAMPLE_PREFIX} {s}" for s in state.error_samples]
     return "\n".join(lines) + "\n"
 
 
@@ -399,4 +408,15 @@ def build_summary(inputs: NightInputs, settings: A1Settings) -> NightSummary:
             text += block
     if omitted:
         text += _omitted_line(omitted, budget - len(text))
-    return NightSummary(text=text, unusual=unusual, normal_count=normal_count, failing_runs=failing_runs, no_run=no_run)
+    return NightSummary(
+        text=text,
+        unusual=unusual,
+        normal_count=normal_count,
+        failing_runs=failing_runs,
+        no_run=no_run,
+        blocks={s.source_code: _block(s, settings.error_sample_max_chars) for s in unusual_states},
+        # Sorted, so the evidence of the finding never depends on the order the rows came in.
+        unexplained_runs=sorted(
+            _run_line(r, False, settings.error_sample_max_chars) for r in failing if r.run_id not in run_ids_with_detail
+        ),
+    )

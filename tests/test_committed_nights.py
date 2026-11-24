@@ -5,9 +5,12 @@ from pathlib import Path
 import pytest
 
 from myopenfund_agents.bench.fixtures import Night
-from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, run_night
+from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, DEFAULT_REPO, repo_of, run_night
 from myopenfund_agents.bench.traps import load_bench
+from myopenfund_agents.core.actions import plan_actions
+from myopenfund_agents.core.detector import detect
 from myopenfund_agents.core.findings import Finding, Findings, Severity
+from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.engines.fake import FakeEngine
 from myopenfund_agents.sanitise import DenyList, check_tree
 from myopenfund_agents.settings import A1Settings
@@ -50,6 +53,25 @@ def test_expected_answer_yields_expected_actions(night: Night) -> None:
     score = run_night(night, FakeEngine(findings), A1Settings(), repeat=1, corpus_repos=DEFAULT_CORPUS_REPOS)
     assert score.valid
     assert score.actions_ok is True
+
+
+@pytest.mark.parametrize("night", NIGHTS, ids=IDS)
+def test_detector_matches_every_committed_night(night: Night) -> None:
+    settings = A1Settings()
+    summary = build_summary(night.inputs, settings)
+    detected = detect(summary, settings)
+    assert {(d.finding.source_code, d.finding.category.value) for d in detected} == night.expected.keys()
+    repos = repo_of(night, DEFAULT_CORPUS_REPOS)
+    planned = plan_actions(
+        Findings(findings=[d.finding for d in detected]),
+        night.inputs.open_issues,
+        repos,
+        DEFAULT_REPO,
+        settings,
+        no_run=summary.no_run,
+    )
+    actions = [(a.kind.value, a.finding.source_code, a.finding.category.value) for a in planned]
+    assert sorted(actions) == sorted((a.kind, a.source_code, a.category.value) for a in night.expected.actions)
 
 
 def test_validation_rule_on_synthetic_nights():

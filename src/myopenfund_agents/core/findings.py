@@ -4,6 +4,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+TITLE_MAX_LENGTH = 120
+EVIDENCE_MAX_ITEMS = 5
+
 
 class Category(StrEnum):
     SOURCE_SITE_DOWN = "source_site_down"
@@ -27,9 +30,9 @@ class Finding(BaseModel):
     source_code: str
     category: Category
     severity: Severity
-    title: str = Field(max_length=120)
+    title: str = Field(max_length=TITLE_MAX_LENGTH)
     diagnosis: str = Field(max_length=2000)
-    evidence: list[str] = Field(max_length=5)
+    evidence: list[str] = Field(max_length=EVIDENCE_MAX_ITEMS)
 
 
 class Findings(BaseModel):
