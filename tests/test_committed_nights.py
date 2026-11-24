@@ -9,9 +9,9 @@ from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, DEFAULT_REPO, r
 from myopenfund_agents.bench.traps import load_bench
 from myopenfund_agents.core.actions import plan_actions
 from myopenfund_agents.core.detector import detect
-from myopenfund_agents.core.findings import Finding, Findings, Severity
+from myopenfund_agents.core.findings import Findings
 from myopenfund_agents.core.summary import build_summary
-from myopenfund_agents.engines.fake import FakeEngine
+from myopenfund_agents.engines.base import EngineError
 from myopenfund_agents.sanitise import DenyList, check_tree
 from myopenfund_agents.settings import A1Settings
 
@@ -35,24 +35,19 @@ def test_night_passes_sanitiser(night: Night) -> None:
     assert check_tree(night, DenyList()) == []
 
 
+class _NoModel:
+    name = "none"
+    model = "none"
+
+    def explain(self, prompt, ids):
+        raise EngineError("no model in CI")
+
+
 @pytest.mark.parametrize("night", NIGHTS, ids=IDS)
-def test_expected_answer_yields_expected_actions(night: Night) -> None:
-    findings = Findings(
-        findings=[
-            Finding(
-                source_code=k.source_code,
-                category=k.category,
-                severity=Severity.WARN,
-                title=f"{k.source_code} {k.category.value}",
-                diagnosis="Scripted diagnosis from the expected answer.",
-                evidence=["scripted evidence"],
-            )
-            for k in night.expected.findings
-        ]
-    )
-    score = run_night(night, FakeEngine(findings), A1Settings(), repeat=1, corpus_repos=DEFAULT_CORPUS_REPOS)
-    assert score.valid
-    assert score.actions_ok is True
+def test_bench_scores_the_detector_exact_without_a_model(night: Night) -> None:
+    score = run_night(night, _NoModel(), A1Settings(), repeat=1, corpus_repos=DEFAULT_CORPUS_REPOS)
+    assert score.detector_exact is True
+    assert score.explained == 0 and score.fallback is bool(night.expected.findings)
 
 
 @pytest.mark.parametrize("night", NIGHTS, ids=IDS)

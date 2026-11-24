@@ -16,11 +16,6 @@ def _finding(category: str = "unreadable_pdf") -> dict:
     }
 
 
-def test_findings_keys():
-    findings = Findings(findings=[Finding(**_finding())])
-    assert findings.keys() == {("se", "unreadable_pdf")}
-
-
 def test_unknown_category_rejected():
     with pytest.raises(ValidationError):
         Finding(**_finding("weird"))
@@ -28,7 +23,6 @@ def test_unknown_category_rejected():
 
 def test_empty_is_valid():
     assert Findings(findings=[]).findings == []
-    assert Findings(findings=[]).keys() == set()
 
 
 def test_findings_key_required():

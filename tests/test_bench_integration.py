@@ -9,7 +9,9 @@ from myopenfund_agents.bench import traps
 from myopenfund_agents.bench.fixtures import Expected, Meta, Night
 from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, run_bench
 from myopenfund_agents.bench.score import load_thresholds
-from myopenfund_agents.core.findings import Category, Finding, Findings, Severity
+from myopenfund_agents.core.detector import detect
+from myopenfund_agents.core.explanations import Explanation, Explanations, Quote
+from myopenfund_agents.core.prompt import explain_prompt
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.engines.base import EngineResult
 from myopenfund_agents.settings import A1Settings
@@ -19,32 +21,32 @@ CODES = ("a1", "b2", "c3", "d4", "e5", "f6")
 S = A1Settings()
 
 
-def _finding(code: str, category: Category) -> Finding:
-    return Finding(
-        source_code=code, category=category, severity=Severity.ERROR, title=f"{code} {category.value}",
-        diagnosis="Oracle diagnosis.", evidence=["oracle evidence"],
-    )  # fmt: skip
-
-
 class OracleEngine:
-    """Answers each night's summary with exactly the expected findings (per-source for the outage trap)."""
+    """Explains each night's findings with a quote of the summary's first line."""
 
     name = "oracle"
     model = "expected"
 
     def __init__(self, nights: list[Night]) -> None:
-        self.answers: dict[str, Findings] = {}
+        self.answers: dict[str, Explanations] = {}
         for n in nights:
-            keys = n.expected.keys()
-            if keys == {("*", "general_outage")}:
-                # As a model would: one site-down finding per failing source, grouped by the deterministic layer.
-                found = [_finding(r.source_code, Category.SOURCE_SITE_DOWN) for r in n.inputs.source_runs]
-            else:
-                found = [_finding(k.source_code, k.category) for k in n.expected.findings]
-            self.answers[build_summary(n.inputs, S).text] = Findings(findings=found)
+            summary = build_summary(n.inputs, S)
+            detected = detect(summary, S)
+            self.answers[explain_prompt(summary.text, detected)] = Explanations(
+                explanations=[
+                    Explanation(
+                        finding_id=d.finding_id, diagnosis="Oracle diagnosis.", likely_cause=d.finding.category,
+                        severity=d.finding.severity, quotes=[Quote(source="summary", text=summary.text.splitlines()[0])],
+                    )
+                    for d in detected
+                ],
+                observations=[],
+            )  # fmt: skip
 
-    def diagnose(self, summary_text: str) -> EngineResult:
-        return EngineResult(self.answers[summary_text], self.name, self.model, 0.01)
+    def explain(self, prompt: str, ids: frozenset[str]) -> EngineResult:
+        answer = self.answers[prompt]
+        assert ids == {e.finding_id for e in answer.explanations}
+        return EngineResult(self.name, self.model, 0.01, explanations=answer)
 
 
 def _nights() -> list[Night]:
@@ -72,11 +74,11 @@ def test_every_trap_passes_with_an_oracle(profile):
     by_id = {s.night_id: s for s in scores}
     for n in nights:
         s = by_id[n.inputs.night_id]
-        assert s.valid and s.agreement == 1.0 and s.extra == [], s
-        assert s.found == sorted(n.expected.keys()), s
-        if n.expected.findings:
-            assert s.actions_ok is True, s
+        assert s.detector_exact and not s.fallback, s
+        assert s.detected == sorted(n.expected.keys()), s
+        assert s.valid == (3 if n.expected.findings else 0), s  # a quiet night asks no model
+        assert set(s.cause_agreement.values()) <= {1.0}, s
     outage = by_id[f"{nights[0].inputs.night_id}--general-outage"]
-    assert len(outage.attempts[0].findings) == len(CODES)  # raw findings kept before grouping
+    assert [f["category"] for f in outage.attempts[0].findings] == ["general_outage"]
     no_run = by_id[f"{nights[0].inputs.night_id}--no-run"]
     assert no_run.attempts[0].actions == [("new_issue", "*", "unknown")]

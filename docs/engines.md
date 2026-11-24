@@ -1,7 +1,9 @@
 # Engines
 
-Agent A1 sends a short text summary of the night to a language model and gets back schema-validated
-findings. The engine is chosen **by environment only**; nothing in the code or the bench picks a model.
+The code decides which findings a night has; the engine only explains them. It gets a short text summary of the
+night and the detected findings, and returns schema-validated explanations, each with quotes the code checks
+against the summary. Without an engine, or when it fails, the same alerts go out with "No explanation.". The
+engine is chosen **by environment only**; nothing in the code or the bench picks a model.
 
 | Variable | Meaning |
 |---|---|
@@ -106,8 +108,8 @@ never hidden. Long overdue cadence series are counted and their sources named, n
 
 ## Bench commands
 
-The bench replays known nights (`bench/nights/`) through the configured engine and scores it against
-`bench/thresholds.toml`.
+The bench replays known nights (`bench/nights/`) through the whole triage: the detector, which must be exact, and
+the configured engine, scored on its explanations against `bench/thresholds.toml`.
 
 ### Deny-list (`MOF_AGENTS_DENYLIST`)
 
@@ -158,19 +160,18 @@ the traps, and the bench rebuilds them; each one checks that the damaged night r
 | `no_run` | no run and no source run tonight: the scheduler did not fire | `(*, unknown)` | `new_issue` |
 | `chronic` | one source fails on three consecutive nights (three nights made) | `(<source>, source_site_down)` each night | `new_issue`, then `comment` twice |
 
-`no_run` is an addition to the spec's trap list (approved 2026-11-23). The instructions tell the model to
-report one `(*, unknown)` error finding for the missing run when the summary says
-`No run finished during this night.`, in addition to findings for any unusual sources. On such a night
-the deterministic layer gives that finding its own fingerprint, `a1:<default_repo>:*:no_run`, so it is
-never mistaken for the chronic `a1:<default_repo>:*:unknown` issue of a failing run without per-source
-detail: a no-run night opens (or comments on) its own no-run issue. The trap refuses a base that already
-carries an open `*:no_run` issue, or that still shows unusual sources once its runs are removed
-(discovery errors or overdue cadence), so those two situations are not measured.
+`no_run` is an addition to the spec's trap list (approved 2026-11-23). When the summary says
+`No run finished during this night.`, the detector makes one `(*, unknown)` error finding for the missing run, in
+addition to any finding about unusual sources. On such a night that finding gets its own fingerprint,
+`a1:<default_repo>:*:no_run`, so it is never mistaken for the chronic `a1:<default_repo>:*:unknown` issue of a
+failing run without per-source detail: a no-run night opens (or comments on) its own no-run issue. The trap
+refuses a base that already carries an open `*:no_run` issue, or that still shows unusual sources once its runs
+are removed (discovery errors or overdue cadence), so those two situations are not measured.
 
 ### Run the bench
 
-CI runs no model on pull requests; the `Local model` workflow is a manual smoke test. Run the bench on your own
-machine before changing a model or the prompt.
+CI runs no model on pull requests, but checks the detector on every committed night; the `Local model`
+workflow is a manual smoke test. Run the bench on your own machine before changing a model or the prompt.
 
 Run the bench with the configured engine:
 
@@ -180,26 +181,50 @@ mof-agents bench-run --profile local [--repeat 3] [--only 2026-11-20,2026-11-21]
   [--corpus-repos corpus-repos.json]
 ```
 
-It prints one line per verdict, then writes `<UTC stamp>-<engine>-<model>.json` and `.md` into `--results`
-and prints the Markdown path.
+It prints one line per verdict and per reported figure, then writes `<UTC stamp>-<engine>-<model>.json` and `.md`
+into `--results` and prints the Markdown path. At least one selected night must have a detected finding: otherwise
+there is nothing to explain, no model is called and the run stops with exit code 2.
 
-The JSON report records how it was produced (`repeat`, every A1 setting, the threshold profile values) and,
-for each night and attempt, the engine's findings before grouping (title, diagnosis, evidence, severity:
-kept so diagnoses can be graded later), the planned actions, seconds, schema retries and input/output
-tokens when the engine reports them. An engine error, a finding title, a diagnosis or an evidence line
-that carries an infrastructure detail is kept as `withheld (<reasons>)`; any other infrastructure detail
-refuses the report (nothing written).
+| Criterion | What it counts | Threshold |
+|---|---|---|
+| `detector exact` | nights whose findings and actions equal the expected answer in every attempt (no model) | 100% |
+| `findings explained` | findings with a kept explanation / detected findings | `min_explained` |
+| `valid output` | attempts whose engine answer was usable / attempts | `min_valid` |
+| `quotes exact (of quotes given)` | quotes found verbatim in the summary / quotes given | `min_quotes_exact` |
+| `fallback nights` | nights where some attempt sent a finding out unexplained | `max_fallback_nights` (optional) |
+| `slowest night (s)` | slowest attempt | `max_seconds_per_night` (optional) |
+
+`max_fallback_nights` is set for `prod` (`local` only reports the figure), `max_seconds_per_night` for `local`. An
+explanation returned without a quote counts as one inexact quote; a missing explanation is measured by `findings
+explained`; no quote in the whole run is 0%. A failed attempt lasts the time it took, so a timed-out engine can fail
+the time limit. When the detector is wrong on a night, in any attempt, `bench-run` prints a `MISMATCH` line and the
+report has a "Detector mismatches" section: expected and detected findings and actions.
+
+The model criteria run over **every** attempt of every night with at least one detected finding: a failed engine is
+0 explained, never skipped. A night without finding is listed with its detector result and is in no model figure.
+Reported without a threshold: fallback nights, numbers in a diagnosis that the summary does not show,
+`likely_cause` agreement per finding over the repeats (mean and worst; an attempt that gave no explanation for the
+finding agrees with no other attempt, so a finding never explained is at 0%; `-` with a single attempt), mean and
+worst seconds, and the tokens the engine reports (`partial (n of m attempts)` when some are unknown, `-` when all are).
+A threshold file with an unknown or missing key is refused.
+
+The JSON report records how it was produced (`repeat`, every A1 setting, the threshold profile values) and, for each
+night and attempt: the detector's findings (title, evidence, other flags) and actions, the engine error, each kept
+explanation (diagnosis, likely cause, severity, quotes: kept so diagnoses can be graded later), why the other
+explanations were dropped (`false quote`, `no quote`, `empty`, `withheld`), the observations, quote and number counts,
+seconds, schema retries and tokens. The model's raw answer is never written: a dropped explanation leaves only its
+reason. A finding title, an evidence line, a diagnosis, a quote, an observation or an engine error that carries an
+infrastructure detail is kept as `withheld (<reasons>)` (an explanation or observation already caught during the
+triage is dropped); any other infrastructure detail refuses the report (nothing written).
 
 ### Profiles
 
 `bench/thresholds.toml` holds two threshold profiles, chosen with `--profile`:
 
-- `prod`: the bar for the engine that will run A1 every night. Every expected problem found, no false
-  alarm, every action right, every general outage grouped, every output valid, identical answers on every
-  repeat; no time limit.
-- `local`: the bar for a free local model on modest hardware. At least 80% of expected problems found,
-  no false alarm, every action, grouping and output right, agreement of at least 66% on the worst night,
-  and at most 600 s per night.
+- `prod`: the bar for the engine that will run A1 every night. Every finding explained, every output valid, every
+  quote exact, no fallback night; no time limit.
+- `local`: the bar for a free local model on modest hardware. At least 90% of findings explained, 90% of outputs
+  valid and 95% of quotes exact, and at most 600 s per night; fallback nights are only reported.
 
 ## Exit codes
 
@@ -207,4 +232,11 @@ refuses the report (nothing written).
 |---|---|---|
 | 0 | night captured | every verdict passes |
 | 1 | capture refused or failed; night directory already exists | a verdict fails; report refused |
-| 2 | missing environment variable, deny-list unset or empty (without `--no-denylist`), unreadable deny-list or bad argument | engine misconfigured, unreadable deny-list, bad thresholds/argument, unreadable night, unknown `--only` id, no night selected |
+| 2 | configuration error | configuration error |
+
+Configuration errors:
+
+- `bench-capture`: missing environment variable, deny-list unset or empty (without `--no-denylist`), unreadable
+  deny-list or bad argument.
+- `bench-run`: engine misconfigured, unreadable deny-list, bad thresholds or argument, unreadable night, unknown
+  `--only` id, no night selected, no detected finding in the selected nights.

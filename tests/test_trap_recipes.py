@@ -8,7 +8,6 @@ from conftest import night, src_run
 from myopenfund_agents.bench.fixtures import Expected, Meta, Night, load, save
 from myopenfund_agents.bench.traps import load_bench
 from myopenfund_agents.cli import main
-from myopenfund_agents.core.findings import Findings
 from myopenfund_agents.core.inputs import RunRow
 from myopenfund_agents.engines.fake import FakeEngine
 
@@ -82,7 +81,7 @@ def test_unknown_base_is_refused(tmp_path, green_history):
 
 def test_cli_reports_a_bad_recipe_as_configuration_error(tmp_path, green_history, monkeypatch, capsys):
     _recipe(tmp_path, _save_base(tmp_path, green_history), '[[trap]]', 'kind = "nope"')
-    monkeypatch.setattr("myopenfund_agents.cli.engine_from_env", lambda settings: FakeEngine(Findings(findings=[])))
+    monkeypatch.setattr("myopenfund_agents.cli.engine_from_env", lambda settings: FakeEngine(None))
     assert main(["bench-run", "--profile", "local", "--nights", str(tmp_path)]) == 2
     assert "unknown trap kind" in capsys.readouterr().err
 

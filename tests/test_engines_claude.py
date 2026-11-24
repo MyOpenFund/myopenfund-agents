@@ -5,39 +5,37 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from myopenfund_agents.core.findings import Findings
-from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, user_prompt
+from myopenfund_agents.core.explanations import Explanations
+from myopenfund_agents.core.prompt import explain_instructions
 from myopenfund_agents.engines.base import EngineError
 from myopenfund_agents.engines.claude_code_engine import (
     REASON_CHARS,
     ClaudeCodeEngine,
     _run,
     check_env,
-    parse_output,
+    parse_explanations,
 )
 from myopenfund_agents.engines.factory import engine_from_env
 from myopenfund_agents.settings import A1Settings
 
 TOKEN = "sk-ant-oat-fake-token-value"
 ENV = {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "PATH": "/usr/bin"}
-GOOD = {
-    "findings": [
-        {
-            "source_code": "se",
-            "category": "unreadable_pdf",
-            "severity": "warn",
-            "title": "se: PDFs unreadable",
-            "diagnosis": "Three PDFs failed text extraction. The site still answers.",
-            "evidence": ["docs_failed=3"],
-        }
-    ]
+IDS = frozenset({"f1", "f2"})
+EXP = {
+    "finding_id": "f1",
+    "diagnosis": "The site answers but three PDFs failed.",
+    "likely_cause": "unreadable_pdf",
+    "severity": "warn",
+    "quotes": [{"source": "summary", "text": "docs_failed=3"}],
 }
-BAD = {"findings": [{**GOOD["findings"][0], "category": "not_a_category"}]}
+EXPLAINED = {"explanations": [EXP], "observations": ["odd"]}
+UNKNOWN_ID = {"explanations": [{**EXP, "finding_id": "zz"}], "observations": []}
+BAD = {"explanations": [{**EXP, "likely_cause": "not_a_category"}], "observations": []}
+PROMPT = "Explain these findings.\n<summary>\ndata\n</summary>\n"
 
 
 def envelope(**kw: Any) -> str:
@@ -82,60 +80,45 @@ def test_claude_env_guards():
         ClaudeCodeEngine(A1Settings(), env={**ENV, "ANTHROPIC_API_KEY": "k"}, runner=FakeRunner())
 
 
-def test_claude_command_shape():
-    cmd = engine(FakeRunner()).command()
-    assert cmd[:2] == ["claude", "-p"]
-    assert cmd[cmd.index("--output-format") + 1] == "json"
-    schema = cmd[cmd.index("--json-schema") + 1]
-    assert json.loads(schema) == Findings.model_json_schema()
-    assert schema == json.dumps(Findings.model_json_schema(), separators=(",", ":"))  # compact
-    assert cmd[cmd.index("--tools") + 1] == ""
-    assert "--strict-mcp-config" in cmd
-    assert cmd[cmd.index("--system-prompt") + 1] == A1_INSTRUCTIONS
-    assert "--bare" not in cmd and "--mcp-config" not in cmd and "--model" not in cmd
-    cmd = engine(FakeRunner(), model="sonnet", binary="/opt/claude").command()
-    assert cmd[0] == "/opt/claude"
-    assert cmd[-2:] == ["--model", "sonnet"]
-
-
-# --- parse_output -----------------------------------------------------------------------------------------
+# --- parse_explanations -----------------------------------------------------------------------------------------
 
 
 def test_parse_structured_and_text():
-    assert parse_output(envelope(structured_output=GOOD)).keys() == {("se", "unreadable_pdf")}
-    text = "Here are the findings:\n```json\n" + json.dumps(GOOD) + "\n```\nDone."
-    assert parse_output(envelope(result=text)).keys() == {("se", "unreadable_pdf")}
-    assert parse_output(envelope(result='{"findings": []}')) == Findings(findings=[])
+    assert parse_explanations(envelope(structured_output=EXPLAINED)) == Explanations.model_validate(EXPLAINED)
+    text = "Here are the explanations:\n```json\n" + json.dumps(EXPLAINED) + "\n```\nDone."
+    assert parse_explanations(envelope(result=text)) == Explanations.model_validate(EXPLAINED)
+    empty = parse_explanations(envelope(result='{"explanations": [], "observations": []}'))
+    assert empty == Explanations(explanations=[], observations=[])
     with pytest.raises(EngineError):
-        parse_output(envelope(result="no json at all"))
+        parse_explanations(envelope(result="no json at all"))
     with pytest.raises(EngineError):
-        parse_output(envelope(structured_output=BAD))
+        parse_explanations(envelope(structured_output=BAD))
     with pytest.raises(EngineError):
-        parse_output("not json")
+        parse_explanations("not json")
     with pytest.raises(EngineError):
-        parse_output("[1, 2]")
+        parse_explanations("[1, 2]")
 
 
 def test_parse_is_error():
     with pytest.raises(EngineError, match="error_during_execution") as info:
-        parse_output(envelope(subtype="error_during_execution", is_error=True, result="rate limit reached"))
+        parse_explanations(envelope(subtype="error_during_execution", is_error=True, result="rate limit reached"))
     assert "rate limit" in str(info.value)
     long = "x" * 5000
     with pytest.raises(EngineError) as info:
-        parse_output(envelope(is_error=True, result=long))
+        parse_explanations(envelope(is_error=True, result=long))
     assert len(str(info.value)) < 600
 
 
-# --- diagnose ---------------------------------------------------------------------------------------------
+# --- process and retries ---------------------------------------------------------------------------------------------
 
 
 def test_claude_retry_then_ok():
     runner = FakeRunner(
         (0, "this is not json"),
-        (0, envelope(structured_output=GOOD, usage={"input_tokens": 1200, "output_tokens": 80})),
+        (0, envelope(structured_output=EXPLAINED, usage={"input_tokens": 1200, "output_tokens": 80})),
     )
-    result = engine(runner).diagnose("night summary")
-    assert result.findings.keys() == {("se", "unreadable_pdf")}
+    result = engine(runner).explain(PROMPT, IDS)
+    assert result.explanations == Explanations.model_validate(EXPLAINED)
     assert result.retries == 1
     assert (result.engine, result.model) == ("claude-code", "default")
     assert (result.input_tokens, result.output_tokens) == (1200, 80)
@@ -144,14 +127,14 @@ def test_claude_retry_then_ok():
     assert cmd[:2] == ["claude", "-p"]
     assert cmd[cmd.index("--tools") + 1] == ""
     assert "--bare" not in cmd
-    assert stdin_text == user_prompt("night summary")
+    assert stdin_text == PROMPT
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN and "ANTHROPIC_API_KEY" not in env
     assert timeout_s == 600
 
 
 def test_claude_retries_nonzero_exit_and_schema_failure():
-    runner = FakeRunner((1, ""), (0, envelope(structured_output=BAD)), (0, envelope(structured_output=GOOD)))
-    result = engine(runner).diagnose("S")
+    runner = FakeRunner((1, ""), (0, envelope(structured_output=BAD)), (0, envelope(structured_output=EXPLAINED)))
+    result = engine(runner).explain(PROMPT, IDS)
     assert result.retries == 2
     assert result.input_tokens is None and result.output_tokens is None
 
@@ -159,7 +142,7 @@ def test_claude_retries_nonzero_exit_and_schema_failure():
 def test_claude_gives_up_after_cap():
     runner = FakeRunner((0, envelope(structured_output=BAD)))
     with pytest.raises(EngineError, match=r"claude-code \(sonnet\).*3 attempts") as info:
-        ClaudeCodeEngine(A1Settings(max_schema_retries=2), model="sonnet", env=ENV, runner=runner).diagnose("S")
+        ClaudeCodeEngine(A1Settings(max_schema_retries=2), model="sonnet", env=ENV, runner=runner).explain(PROMPT, IDS)
     assert len(runner.calls) == 3
     assert TOKEN not in str(info.value)
 
@@ -169,7 +152,7 @@ def test_claude_error_never_quotes_the_token():
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=f"invalid token {TOKEN}")
 
     with pytest.raises(EngineError, match="exit code 1: .*stderr: invalid token <redacted>") as info:
-        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).diagnose("S")
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).explain(PROMPT, IDS)
     assert TOKEN not in str(info.value)
 
 
@@ -177,24 +160,14 @@ def test_claude_error_never_quotes_the_token():
 def test_claude_rate_limit_fails_fast(code):
     runner = FakeRunner((code, envelope(subtype="error_during_execution", is_error=True, result="rate limit")))
     with pytest.raises(EngineError, match=r"claude-code \(default\).*error_during_execution.*rate limit"):
-        ClaudeCodeEngine(A1Settings(max_schema_retries=2), env=ENV, runner=runner).diagnose("S")
+        ClaudeCodeEngine(A1Settings(max_schema_retries=2), env=ENV, runner=runner).explain(PROMPT, IDS)
     assert len(runner.calls) == 1  # is_error is not retried
 
 
-def test_parse_requires_findings_key():
-    with pytest.raises(EngineError, match="findings"):
-        parse_output(envelope(result="Sorry, I cannot {}"))
-    with pytest.raises(EngineError, match="findings"):
-        parse_output(envelope(structured_output={}))
-    with pytest.raises(EngineError, match="findings"):
-        parse_output(envelope(result='{"answer": 1}'))
-
-
-def test_claude_no_silent_empty_findings():
-    runner = FakeRunner((0, envelope(result="Sorry, I cannot {}")))
-    with pytest.raises(EngineError, match=r"3 attempts.*findings"):
-        engine(runner).diagnose("S")
-    assert len(runner.calls) == 3
+def test_parse_requires_both_keys():
+    for out in (envelope(result="Sorry, I cannot {}"), envelope(structured_output={}), envelope(result='{"answer": 1}')):
+        with pytest.raises(EngineError, match="explanations"):
+            parse_explanations(out)
 
 
 @pytest.mark.parametrize("cut", [-5, -1, 0, 3, 10])
@@ -208,7 +181,7 @@ def test_claude_redacts_token_straddling_the_cut(cut):
         return subprocess.CompletedProcess(cmd, 1, stdout=leaky_out, stderr=leaky_err)
 
     with pytest.raises(EngineError) as info:
-        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).diagnose("S")
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=leaky).explain(PROMPT, IDS)
     message = str(info.value)
     for prefix in (TOKEN[:6], TOKEN[-6:]):
         assert prefix not in message
@@ -219,7 +192,7 @@ def test_claude_nonzero_exit_non_json_keeps_stderr():
         return subprocess.CompletedProcess(cmd, 2, stdout="Error: something", stderr="network unreachable")
 
     with pytest.raises(EngineError, match=r"exit code 2: output is not JSON.*stderr: network unreachable"):
-        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=failing).diagnose("S")
+        ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=failing).explain(PROMPT, IDS)
 
 
 def test_default_runner_replaces_undecodable_bytes():
@@ -232,7 +205,7 @@ def test_default_runner_replaces_undecodable_bytes():
 def test_claude_decode_error_is_engine_error():
     runner = FakeRunner(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
     with pytest.raises(EngineError, match=r"claude-code \(default\).*UnicodeDecodeError") as info:
-        engine(runner).diagnose("S")
+        engine(runner).explain(PROMPT, IDS)
     assert isinstance(info.value.__cause__, UnicodeDecodeError)
 
 
@@ -249,7 +222,7 @@ def test_claude_billing_vars_refused(var):
 def test_claude_timeout_is_engine_error():
     runner = FakeRunner(subprocess.TimeoutExpired(["claude", "-p"], 5))
     with pytest.raises(EngineError, match=r"claude-code \(default\).*timed out") as info:
-        engine(runner, timeout_s=5).diagnose("S")
+        engine(runner, timeout_s=5).explain(PROMPT, IDS)
     assert isinstance(info.value.__cause__, subprocess.TimeoutExpired)
     assert len(runner.calls) == 1  # no retry
 
@@ -257,7 +230,7 @@ def test_claude_timeout_is_engine_error():
 def test_claude_binary_missing_is_engine_error():
     runner = FakeRunner(FileNotFoundError(2, "No such file or directory", "claude"))
     with pytest.raises(EngineError, match=r"claude-code \(default\)") as info:
-        engine(runner).diagnose("S")
+        engine(runner).explain(PROMPT, IDS)
     assert isinstance(info.value.__cause__, FileNotFoundError)
     assert len(runner.calls) == 1
 
@@ -270,7 +243,7 @@ def test_factory_claude_code():
     assert isinstance(built, ClaudeCodeEngine)
     assert (built.name, built.model) == ("claude-code", "default")
     built = engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code", "MOF_AGENTS_MODEL": "opus", **ENV})
-    assert built.model == "opus" and built.command()[-2:] == ["--model", "opus"]
+    assert built.model == "opus" and built.explain_command()[-2:] == ["--model", "opus"]
     with pytest.raises(EngineError, match="CLAUDE_CODE_OAUTH_TOKEN"):
         engine_from_env(A1Settings(), {"MOF_AGENTS_ENGINE": "claude-code"})
     with pytest.raises(EngineError, match="ANTHROPIC_API_KEY"):
@@ -278,10 +251,10 @@ def test_factory_claude_code():
 
 
 def test_claude_timeout_from_settings_unless_explicit():
-    runner = FakeRunner((0, envelope(structured_output=GOOD)))
-    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner).diagnose("S")
+    runner = FakeRunner((0, envelope(structured_output=EXPLAINED)))
+    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner).explain(PROMPT, IDS)
     assert runner.calls[-1][3] == 42.0
-    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner, timeout_s=7).diagnose("S")
+    ClaudeCodeEngine(A1Settings(engine_timeout_s=42.0), env=ENV, runner=runner, timeout_s=7).explain(PROMPT, IDS)
     assert runner.calls[-1][3] == 7
 
 
@@ -290,11 +263,26 @@ def test_factory_claude_code_uses_timeout_setting():
     assert built._timeout_s == 42.0
 
 
-def test_real_envelope_names_the_model_and_counts_cached_input():
-    """A real `claude -p` output (ids replaced): cached prompt tokens are input too, and `default` is resolved."""
-    raw = (Path(__file__).parent / "data" / "claude_output.json").read_text(encoding="utf-8")
-    result = engine(FakeRunner((0, raw))).diagnose("s")
-    assert result.findings.keys() == {("se", "source_site_down")}
+def test_full_envelope_names_the_model_and_counts_cached_input():
+    """Hand-built in the shape of a `claude -p` envelope: cached prompt tokens are input too, `default` is resolved."""
+    raw = envelope(
+        structured_output=EXPLAINED,
+        result=json.dumps(EXPLAINED),
+        stop_reason="tool_use",
+        num_turns=2,
+        permission_denials=[],
+        usage={
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 2568,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 378,
+            "output_tokens_details": {"thinking_tokens": 0},
+            "iterations": [{"input_tokens": 2, "output_tokens": 378, "type": "message"}],
+        },
+        modelUsage={"claude-sonnet-5-5": {"inputTokens": 2, "outputTokens": 378, "canonicalModel": "claude-sonnet-5-5"}},
+    )
+    result = engine(FakeRunner((0, raw))).explain(PROMPT, IDS)
+    assert result.explanations == Explanations.model_validate(EXPLAINED)
     assert result.model == "claude-sonnet-5-5"
     assert (result.input_tokens, result.output_tokens) == (2570, 378)
 
@@ -309,50 +297,40 @@ def test_real_envelope_names_the_model_and_counts_cached_input():
     ],
 )
 def test_input_tokens_with_partial_usage(usage, expected):
-    runner = FakeRunner((0, envelope(structured_output=GOOD, usage=usage)))
-    assert engine(runner).diagnose("s").input_tokens == expected
+    runner = FakeRunner((0, envelope(structured_output=EXPLAINED, usage=usage)))
+    assert engine(runner).explain(PROMPT, IDS).input_tokens == expected
 
 
 @pytest.mark.parametrize("used", [None, {}, [], "x"])
 def test_model_falls_back_to_the_configured_one(used):
-    runner = FakeRunner((0, envelope(structured_output=GOOD, modelUsage=used)))
-    assert engine(runner).diagnose("s").model == "default"
+    runner = FakeRunner((0, envelope(structured_output=EXPLAINED, modelUsage=used)))
+    assert engine(runner).explain(PROMPT, IDS).model == "default"
 
 
 def test_several_models_are_all_named():
-    runner = FakeRunner((0, envelope(structured_output=GOOD, modelUsage={"b": {}, "a": {}})))
-    assert engine(runner).diagnose("s").model == "a+b"
+    runner = FakeRunner((0, envelope(structured_output=EXPLAINED, modelUsage={"b": {}, "a": {}})))
+    assert engine(runner).explain(PROMPT, IDS).model == "a+b"
 
 
 # --- explain ----------------------------------------------------------------------------------------------
 
-IDS = frozenset({"f1", "f2"})
-EXP = {
-    "finding_id": "f1",
-    "diagnosis": "The site answers but three PDFs failed.",
-    "likely_cause": "unreadable_pdf",
-    "severity": "warn",
-    "quotes": [{"source": "summary", "text": "docs_failed=3"}],
-}
-EXPLAINED = {"explanations": [EXP], "observations": ["odd"]}
-UNKNOWN_ID = {"explanations": [{**EXP, "finding_id": "zz"}], "observations": []}
-PROMPT = "Explain these findings.\n<summary>\ndata\n</summary>\n"
 
 
 def test_explain_command_shape():
-    from myopenfund_agents.core.explanations import Explanations
-    from myopenfund_agents.core.prompt import explain_instructions
-
     cmd = engine(FakeRunner()).explain_command()
     assert cmd[:2] == ["claude", "-p"]
+    assert cmd[cmd.index("--output-format") + 1] == "json"
     schema = cmd[cmd.index("--json-schema") + 1]
     assert json.loads(schema) == Explanations.model_json_schema()
     assert schema == json.dumps(Explanations.model_json_schema(), separators=(",", ":"))
     assert cmd[cmd.index("--system-prompt") + 1] == explain_instructions(A1Settings())
     assert cmd[cmd.index("--tools") + 1] == "" and "--strict-mcp-config" in cmd
     assert "--bare" not in cmd and "--model" not in cmd
+    flags = ["-p", "--output-format", "--json-schema", "--tools", "--strict-mcp-config", "--system-prompt"]
+    assert [x for x in cmd if x.startswith("-")] == flags  # nothing else, in particular no tool or server
     assert engine(FakeRunner(), model="sonnet").explain_command()[-2:] == ["--model", "sonnet"]
-    assert engine(FakeRunner()).command()[cmd.index("--json-schema") + 1] != schema  # diagnose is unchanged
+    assert "--mcp-config" not in cmd
+    assert engine(FakeRunner(), binary="/opt/claude").explain_command()[0] == "/opt/claude"
 
 
 def test_explain_valid():
@@ -404,6 +382,7 @@ def test_explain_text_without_json_is_never_empty():
     runner = FakeRunner((0, envelope(result="Sorry, I cannot {}")))
     with pytest.raises(EngineError, match=r"3 attempts.*explanations"):
         engine(runner).explain(PROMPT, IDS)
+    assert len(runner.calls) == 3
 
 
 def test_explain_empty_but_complete_answer_is_valid():
@@ -432,7 +411,7 @@ def test_explain_nonzero_exit_retried():
     assert engine(runner).explain(PROMPT, IDS).retries == 1
 
 
-def test_explain_guards_as_diagnose():
+def test_explain_guards():
     runner = FakeRunner((0, envelope(subtype="error_during_execution", is_error=True, result="rate limit")))
     with pytest.raises(EngineError, match=r"error_during_execution.*rate limit"):
         engine(runner).explain(PROMPT, IDS)
@@ -557,12 +536,6 @@ def test_nonzero_exit_with_valid_json_is_rejected_when_retries_run_out():
     assert len(runner.calls) == 3
 
 
-def test_diagnose_retry_prompt_is_unchanged():
-    runner = FakeRunner((0, "not json"), (0, envelope(structured_output=GOOD)))
-    engine(runner).diagnose("S")
-    assert runner.calls[0][1] == runner.calls[1][1] == user_prompt("S")
-
-
 def test_two_retries_do_not_accumulate_feedback():
     runner = FakeRunner(
         (0, envelope(structured_output=UNKNOWN_ID)),
@@ -583,8 +556,6 @@ def test_explain_attempts_follow_max_schema_retries(retries):
 
 
 def test_explain_limits_come_from_settings():
-    from myopenfund_agents.core.prompt import explain_instructions
-
     settings = A1Settings(quotes_max=5)
     cmd = ClaudeCodeEngine(settings, env=ENV, runner=FakeRunner()).explain_command()
     assert cmd[cmd.index("--system-prompt") + 1] == explain_instructions(settings)
@@ -596,14 +567,7 @@ def test_explain_limits_come_from_settings():
         ClaudeCodeEngine(A1Settings(max_schema_retries=0), env=ENV, runner=runner).explain(PROMPT, IDS)
 
 
-def test_explain_result_has_an_empty_findings_placeholder():
-    runner = FakeRunner((0, envelope(structured_output=EXPLAINED)))
-    assert engine(runner).explain(PROMPT, IDS).findings == Findings(findings=[])
-
-
 def test_missing_key_message_names_the_keys():
-    from myopenfund_agents.engines.claude_code_engine import parse_explanations
-
     with pytest.raises(EngineError, match="'explanations' and 'observations'"):
         parse_explanations(envelope(structured_output={}))
 
@@ -648,13 +612,6 @@ def test_token_written_with_unicode_escapes_is_redacted_everywhere():
     with pytest.raises(EngineError) as info:
         engine(FakeRunner((0, broken))).explain(PROMPT, IDS)
     assert TOKEN not in str(info.value)
-
-
-def test_diagnose_redacts_escaped_token_too():
-    good = {"findings": [{**GOOD["findings"][0], "diagnosis": "x"}]}
-    raw = envelope(structured_output=good).replace('"x"', f'"{_escaped(TOKEN)}"')
-    result = engine(FakeRunner((0, raw))).diagnose("S")
-    assert TOKEN not in result.findings.findings[0].diagnosis
 
 
 # --- accounting ------------------------------------------------------------------------------------------
@@ -726,13 +683,11 @@ def _bad_outputs(good: dict[str, Any]) -> dict[str, str]:
 
 @pytest.mark.parametrize("name", ["huge-int", "deep-200k", "deep-1500", "result-huge-int", "result-deep-200k",
                                   "result-deep-1500", "envelope-huge-int", "envelope-deep-200k"])
-def test_malformed_json_is_an_engine_error_for_explain_and_diagnose(name):
-    for good, call in ((EXPLAINED, lambda e: e.explain(PROMPT, IDS)), (GOOD, lambda e: e.diagnose("S"))):
-        bad = _bad_outputs(good)[name]
-        runner = FakeRunner((0, bad))
-        with pytest.raises(EngineError, match="3 attempts"):
-            call(engine(runner))
-        assert len(runner.calls) == 3
+def test_malformed_json_is_an_engine_error(name):
+    runner = FakeRunner((0, _bad_outputs(EXPLAINED)[name]))
+    with pytest.raises(EngineError, match="3 attempts"):
+        engine(runner).explain(PROMPT, IDS)
+    assert len(runner.calls) == 3
 
 
 @pytest.mark.parametrize("name", ["huge-int", "deep-200k", "result-huge-int", "result-deep-200k", "envelope-huge-int"])
@@ -744,28 +699,21 @@ def test_malformed_json_is_retried_with_fixed_feedback(name):
     assert "rejected" in tail and len(tail) < 400 and "9999" not in tail and "[[[[" not in tail
 
 
-@pytest.mark.parametrize("call", ["explain", "diagnose"])
-def test_deep_but_decodable_json_still_works_and_is_redacted(call):
-    good = EXPLAINED if call == "explain" else GOOD
-    raw = json.dumps({"type": "result", "is_error": False, "structured_output": good, "junk": "J"}).replace(
+def test_deep_but_decodable_json_still_works_and_is_redacted():
+    raw = json.dumps({"type": "result", "is_error": False, "structured_output": EXPLAINED, "junk": "J"}).replace(
         '"J"', DEEP_1500[:1500] + f'"{TOKEN}"' + DEEP_1500[1500:]
     )
-    e = engine(FakeRunner((0, raw)))
-    result = e.explain(PROMPT, IDS) if call == "explain" else e.diagnose("S")
-    assert result.retries == 0
+    assert engine(FakeRunner((0, raw))).explain(PROMPT, IDS).retries == 0
 
 
-def test_parse_functions_raise_engine_error_only():
-    from myopenfund_agents.engines.claude_code_engine import parse_explanations
-
+def test_parse_raises_engine_error_only():
     for name, raw in _bad_outputs(EXPLAINED).items():
-        for parse in (parse_output, parse_explanations):
-            try:
-                parse(raw)
-            except EngineError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                raise AssertionError(f"{name}: {type(exc).__name__}") from exc
+        try:
+            parse_explanations(raw)
+        except EngineError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            raise AssertionError(f"{name}: {type(exc).__name__}") from exc
 
 
 # --- redaction of the inner JSON, of keys, and the final message ------------------------------------------
@@ -794,11 +742,9 @@ def test_token_used_as_a_json_key_is_redacted():
     assert TOKEN not in str(info.value) and "<redacted>" in str(info.value)
 
 
-@pytest.mark.parametrize(("call", "what"), [("explain", "explanations"), ("diagnose", "findings")])
-def test_final_error_names_what_was_expected(call, what):
-    e = engine(FakeRunner((0, "not json")))
-    with pytest.raises(EngineError, match=f"no valid {what} after 3 attempts"):
-        e.explain(PROMPT, IDS) if call == "explain" else e.diagnose("S")
+def test_final_error_names_what_was_expected():
+    with pytest.raises(EngineError, match="no valid explanations after 3 attempts"):
+        engine(FakeRunner((0, "not json"))).explain(PROMPT, IDS)
 
 
 def test_feedback_errors_max_is_a_setting():

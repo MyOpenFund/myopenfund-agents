@@ -17,7 +17,6 @@ from myopenfund_agents.settings import A1Settings
 
 S = A1Settings()
 DENY = DenyList()
-EMPTY = Findings(findings=[])
 
 
 def _inputs(codes=("aa", "bb"), **kw):
@@ -51,7 +50,7 @@ def _keys(t):
 
 
 def _engine(explanations):
-    return FakeEngine(EMPTY, explanations=explanations)
+    return FakeEngine(explanations)
 
 
 def test_explained_run_puts_model_text_in_the_actions():

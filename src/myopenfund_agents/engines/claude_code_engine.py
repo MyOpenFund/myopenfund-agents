@@ -14,11 +14,10 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from myopenfund_agents.core.explanations import Explanations, id_error
-from myopenfund_agents.core.findings import Findings
-from myopenfund_agents.core.prompt import A1_INSTRUCTIONS, explain_instructions, user_prompt
+from myopenfund_agents.core.prompt import explain_instructions
 from myopenfund_agents.engines.base import EngineError, EngineResult
 from myopenfund_agents.settings import A1Settings
 
@@ -78,17 +77,20 @@ class AnswerError(EngineError):
 NOT_JSON = "not valid JSON"
 
 
-def _field_names(model: type[BaseModel]) -> frozenset[str]:
+REQUIRED = ("explanations", "observations")
+
+
+def _field_names() -> frozenset[str]:
     """Every property name of the schema: the only strings of a validation error that are ours."""
-    schema = model.model_json_schema()
+    schema = Explanations.model_json_schema()
     names = set(schema.get("properties", {}))
     for definition in schema.get("$defs", {}).values():
         names |= set(definition.get("properties", {}))
     return frozenset(names)
 
 
-def _schema_feedback(exc: ValidationError, model: type[BaseModel], limit: int) -> str:
-    known = _field_names(model)
+def _schema_feedback(exc: ValidationError, limit: int) -> str:
+    known = _field_names()
     places: list[str] = []
     kinds: list[str] = []
     for error in exc.errors()[:limit]:
@@ -101,18 +103,16 @@ def _schema_feedback(exc: ValidationError, model: type[BaseModel], limit: int) -
     return f"does not match the schema at: {', '.join(places)} ({', '.join(sorted(set(kinds)))})"
 
 
-def _validate[M: BaseModel](data: Any, where: str, model: type[M], required: tuple[str, ...], limit: int) -> M:
-    # A missing key would validate as an empty list: a silent clean night (Review Focus 3).
-    missing = [key for key in required if not isinstance(data, dict) or key not in data]
+def _validate(data: Any, where: str, limit: int) -> Explanations:
+    # Both keys are required: a bare {} or a missing key is never "nothing to explain" (Review Focus 3).
+    missing = [key for key in REQUIRED if not isinstance(data, dict) or key not in data]
     if missing:
-        names = " and ".join(repr(key) for key in required)
+        names = " and ".join(repr(key) for key in REQUIRED)
         raise AnswerError(f"{where} has no {names} key", f"missing key(s): {', '.join(missing)}")
     try:
-        return model.model_validate(data)
+        return Explanations.model_validate(data)
     except ValidationError as exc:
-        raise AnswerError(
-            f"{where} does not match the schema: {_short(str(exc))}", _schema_feedback(exc, model, limit)
-        ) from exc
+        raise AnswerError(f"{where} does not match the schema: {_short(str(exc))}", _schema_feedback(exc, limit)) from exc
 
 
 def _loads(text: str, detail: str) -> Any:
@@ -135,39 +135,26 @@ def _identity(value: Any) -> Any:
     return value
 
 
-def _parse_data[M: BaseModel](
-    data: dict[str, Any],
-    model: type[M],
-    required: tuple[str, ...],
-    limit: int,
-    clean: Callable[[Any], Any] = _identity,
-) -> M:
-    """`model` from the envelope: `structured_output`, else the outermost {…} in `result` (decoded, then `clean`ed)."""
+def _parse_data(data: dict[str, Any], limit: int, clean: Callable[[Any], Any] = _identity) -> Explanations:
+    """The answer of the envelope: `structured_output`, else the outermost {…} in `result` (decoded, then `clean`ed)."""
     if data.get("is_error"):
         detail = data.get("result")
         detail = _short(detail) if isinstance(detail, str) else ""
         raise CLIError(f"CLI error ({data.get('subtype', 'unknown')}): {detail}".rstrip(": "))
     structured = data.get("structured_output")
     if isinstance(structured, dict):
-        return _validate(structured, "structured_output", model, required, limit)
+        return _validate(structured, "structured_output", limit)
     result = data.get("result")
     if isinstance(result, str):
         start, end = result.find("{"), result.rfind("}")
         if start != -1 and end > start:
             obj = _loads(result[start : end + 1], f"result holds no valid JSON object: {_short(result)}")
-            return _validate(clean(obj), "result", model, required, limit)
+            return _validate(clean(obj), "result", limit)
     raise AnswerError("output holds neither structured_output nor a JSON object in result", NOT_JSON)
 
 
-def parse_output(stdout: str) -> Findings:
-    return _parse_data(_envelope(stdout), Findings, ("findings",), A1Settings.feedback_errors_max)
-
-
 def parse_explanations(stdout: str) -> Explanations:
-    """Both keys are required: a bare {} or a missing key is never "nothing to explain"."""
-    return _parse_data(
-        _envelope(stdout), Explanations, ("explanations", "observations"), A1Settings.feedback_errors_max
-    )
+    return _parse_data(_envelope(stdout), A1Settings.feedback_errors_max)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -220,29 +207,23 @@ class ClaudeCodeEngine:
         self._runner = runner
         check_env(self._env)
 
-    def _command(self, schema: type[BaseModel], instructions: str) -> list[str]:
+    def explain_command(self) -> list[str]:
         cmd = [
             self._binary,
             "-p",
             "--output-format",
             "json",
             "--json-schema",
-            json.dumps(schema.model_json_schema(), separators=(",", ":")),
+            json.dumps(Explanations.model_json_schema(), separators=(",", ":")),
             "--tools",
             "",
             "--strict-mcp-config",
             "--system-prompt",
-            instructions,
+            explain_instructions(self._settings),
         ]
         if self.model != DEFAULT_MODEL:
             cmd += ["--model", self.model]
         return cmd
-
-    def command(self) -> list[str]:
-        return self._command(Findings, A1_INSTRUCTIONS)
-
-    def explain_command(self) -> list[str]:
-        return self._command(Explanations, explain_instructions(self._settings))
 
     def _redact(self, text: str) -> str:
         """Remove secret values from CLI output before anything is parsed, shortened or quoted."""
@@ -281,20 +262,12 @@ class ClaudeCodeEngine:
     def _fail(self, message: str) -> EngineError:
         return EngineError(f"{self.name} ({self.model}): {self._redact(message)}")
 
-    def _ask[M: BaseModel](
-        self,
-        cmd: list[str],
-        prompt: str,
-        model: type[M],
-        required: tuple[str, ...],
-        check: Callable[[M], str | None],
-        what: str,
-        tell_model: bool,
-    ) -> tuple[M, dict[str, Any], int, float, int | None, int | None]:
-        """Run the CLI until `parse` and `check` accept its answer; `tell_model` appends our feedback to the prompt.
+    def explain(self, prompt: str, ids: frozenset[str]) -> EngineResult:
+        """Run the CLI until its answer parses and passes `id_error`, telling the model why an answer was rejected.
 
         The feedback is fixed wording about the last attempt only (see AnswerError); a failed process is retried
         with the original prompt. Seconds and tokens add up over every attempt."""
+        cmd = self.explain_command()
         attempts = self._settings.max_schema_retries + 1
         limit = self._settings.feedback_errors_max
         reason, feedback = "", None
@@ -303,7 +276,7 @@ class ClaudeCodeEngine:
         start = time.monotonic()
         for attempt in range(attempts):
             sent = prompt
-            if tell_model and feedback:
+            if feedback:
                 sent += f"\nYour previous answer was rejected: {feedback}.\nAnswer again, fixing this.\n"
             try:
                 completed = self._runner(cmd, sent, self._env, self._timeout_s)
@@ -314,13 +287,12 @@ class ClaudeCodeEngine:
             stdout = self._redact(completed.stdout or "")
             stderr = _short(self._redact(completed.stderr or ""))
             feedback = None
-            data: dict[str, Any] = {}
             try:
                 data = self._redact_decoded(_envelope(stdout))
                 used_in, used_out = _usage_of(data)
                 tokens_in = _add(tokens_in, used_in)
                 tokens_out = _add(tokens_out, used_out)
-                parsed = _parse_data(data, model, required, limit, self._redact_decoded)
+                parsed = _parse_data(data, limit, self._redact_decoded)
             except CLIError as exc:  # rate limit, auth, execution error: fail fast, no retry
                 raise self._fail(f"{exc} (exit code {completed.returncode})") from exc
             except EngineError as exc:
@@ -333,47 +305,17 @@ class ClaudeCodeEngine:
             if completed.returncode != 0:
                 reason = f"exit code {completed.returncode}" + (f"; stderr: {stderr}" if stderr else "")
                 continue
-            problem = check(parsed)
+            problem = id_error(parsed, ids, self._settings)
             if problem:
                 reason = feedback = problem
                 continue
-            return parsed, data, attempt, time.monotonic() - start, tokens_in, tokens_out
-        raise self._fail(f"no valid {what} after {attempts} attempts; last failure: {reason}")
-
-    def _result(
-        self, answer: tuple[Any, dict[str, Any], int, float, int | None, int | None], **payload: Any
-    ) -> EngineResult:
-        _, data, attempt, seconds, tokens_in, tokens_out = answer
-        return EngineResult(
-            engine=self.name,
-            model=_model_used(data, self.model),
-            seconds=seconds,
-            retries=attempt,
-            input_tokens=tokens_in,
-            output_tokens=tokens_out,
-            **payload,
-        )
-
-    def diagnose(self, summary_text: str) -> EngineResult:
-        answer = self._ask(
-            self.command(),
-            user_prompt(summary_text),
-            Findings,
-            ("findings",),
-            lambda _: None,
-            "findings",
-            tell_model=False,
-        )
-        return self._result(answer, findings=answer[0])
-
-    def explain(self, prompt: str, ids: frozenset[str]) -> EngineResult:
-        answer = self._ask(
-            self.explain_command(),
-            prompt,
-            Explanations,
-            ("explanations", "observations"),
-            lambda e: id_error(e, ids, self._settings),
-            "explanations",
-            tell_model=True,
-        )
-        return self._result(answer, findings=Findings(findings=[]), explanations=answer[0])
+            return EngineResult(
+                engine=self.name,
+                model=_model_used(data, self.model),
+                seconds=time.monotonic() - start,
+                retries=attempt,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+                explanations=parsed,
+            )
+        raise self._fail(f"no valid explanations after {attempts} attempts; last failure: {reason}")

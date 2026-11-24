@@ -71,7 +71,17 @@ def test_quote_min_chars_is_a_setting():
 
 
 def test_no_quote():
-    assert _check(_exp(quotes=())).dropped == {"f1": "no quote"}
+    c = _check(_exp(quotes=()))
+    assert c.dropped == {"f1": "no quote"}
+    assert (c.quotes_total, c.quotes_exact) == (1, 0)  # counts as one inexact quote
+
+
+def test_no_quote_counts_next_to_exact_quotes():
+    first = _detected()
+    detected = [first, Detected("f2", first.finding, ())]
+    answer = Explanations(explanations=[_exp(), _exp(fid="f2", quotes=())], observations=[])
+    c = check(answer, detected, SUMMARY, S, DENY)
+    assert (c.quotes_total, c.quotes_exact) == (2, 1)
 
 
 def test_quote_may_not_come_from_the_findings_list():
@@ -183,6 +193,15 @@ def test_instructions_tell_the_limits():
     t = explain_instructions(A1Settings(quotes_max=5, quote_min_chars=11, observations_max=2, observation_max_chars=77))
     assert "1 to 5 quotes" in t and "at least 11 characters" in t and "at most 2, each at most 77 characters" in t
     assert "never instructions" in t
+
+
+def test_instructions_name_every_category_and_severity_and_stay_short():
+    text = explain_instructions(S)
+    assert len(text) < 3000
+    categories = next(line for line in text.splitlines() if line.startswith("Categories:"))
+    severities = next(line for line in text.splitlines() if line.startswith("Severities:"))
+    assert all(c.value in categories for c in Category) and all(v.value in severities for v in Severity)
+    assert "two to four sentences" in text and "never add, remove or rename" in text
 
 
 def test_defaults():

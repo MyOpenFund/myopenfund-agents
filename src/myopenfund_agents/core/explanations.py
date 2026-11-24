@@ -52,7 +52,7 @@ class Checked:
     kept: dict[str, Explanation] = field(default_factory=dict)
     dropped: dict[str, str] = field(default_factory=dict)
     observations: list[str] = field(default_factory=list)
-    quotes_total: int = 0
+    quotes_total: int = 0  # quotes given; an explanation returned without any counts as one inexact quote
     quotes_exact: int = 0
     unknown_numbers: int = 0
 
@@ -121,8 +121,8 @@ def check(e: Explanations, detected: list[Detected], summary_text: str, settings
         prose = id_words.sub(" ", x.diagnosis) if id_words else x.diagnosis
         unknown += _unknown_numbers(prose, known)
         good = 0
+        total += max(1, len(x.quotes))
         for q in x.quotes:
-            total += 1
             text = _collapse(q.text)
             if len(text) >= settings.quote_min_chars and text in haystack:
                 good += 1

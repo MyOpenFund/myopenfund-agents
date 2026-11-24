@@ -1,4 +1,4 @@
-"""Findings produced by an engine; its JSON schema is sent to the model."""
+"""Findings made by the detector."""
 
 from enum import StrEnum
 
@@ -39,6 +39,3 @@ class Findings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     findings: list[Finding]  # required: a bare {} must never read as a clean night
-
-    def keys(self) -> set[tuple[str, str]]:
-        return {(f.source_code, f.category.value) for f in self.findings}
