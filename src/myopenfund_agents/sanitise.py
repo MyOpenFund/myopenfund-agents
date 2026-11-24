@@ -226,3 +226,18 @@ def redact_paths(found: Iterable[str], deny: DenyList) -> list[str]:
         path, _, reason = item.rpartition(": ")
         out.append(f"{'<redacted path>' if violations(path, deny) else path}: {reason}")
     return out
+
+
+def error_text(exc: BaseException, deny: DenyList) -> str:
+    """The error text, or a withheld marker when it carries an infra detail (a report or issue must stay publishable).
+
+    Never raises: an exception whose text cannot be read gives its type name."""
+    name = type(exc).__name__
+    try:
+        text = str(exc)
+        reasons = violations(text, deny)
+    except Exception:  # noqa: BLE001 - a hostile __str__ must not break the caller; the type name says enough
+        return name
+    if reasons:
+        return f"{name}: withheld ({', '.join(reasons)})"
+    return text

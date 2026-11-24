@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from myopenfund_agents.core.explanations import Explanations
 from myopenfund_agents.core.findings import Findings
 
 
@@ -19,6 +20,7 @@ class EngineResult:
     retries: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    explanations: Explanations | None = None  # set by `explain`; `findings` is then an empty placeholder
 
 
 class Engine(Protocol):
@@ -26,3 +28,5 @@ class Engine(Protocol):
     model: str
 
     def diagnose(self, summary_text: str) -> EngineResult: ...
+
+    def explain(self, prompt: str, ids: frozenset[str]) -> EngineResult: ...

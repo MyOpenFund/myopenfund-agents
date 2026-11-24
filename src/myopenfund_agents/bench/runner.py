@@ -24,7 +24,7 @@ from myopenfund_agents.bench.score import (
 from myopenfund_agents.core.actions import group_outages, plan_actions
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.engines.base import Engine, EngineError
-from myopenfund_agents.sanitise import DenyList, check_tree, redact_paths, violations
+from myopenfund_agents.sanitise import DenyList, check_tree, error_text, redact_paths, violations
 from myopenfund_agents.settings import A1Settings
 
 DEFAULT_CORPUS_REPOS = {"central-bank": "central-bank-corpus", "company": "company-corpus"}
@@ -58,7 +58,7 @@ def run_night(
         try:
             result = engine.diagnose(summary.text)
         except EngineError as exc:
-            attempts.append(Attempt(None, None, time.monotonic() - start, error=_error_text(exc, deny or DenyList())))
+            attempts.append(Attempt(None, None, time.monotonic() - start, error=error_text(exc, deny or DenyList())))
             continue
         # Scored after the deterministic grouping, as A1 would act on it.
         keys = group_outages(result.findings, settings).keys()
@@ -79,14 +79,6 @@ def run_night(
             )
         )
     return score_night(night, attempts)
-
-
-def _error_text(exc: Exception, deny: DenyList) -> str:
-    """The engine error, or a withheld marker when it carries an infra detail (the report must stay publishable)."""
-    reasons = violations(str(exc), deny)
-    if reasons:
-        return f"{type(exc).__name__}: withheld ({', '.join(reasons)})"
-    return str(exc)
 
 
 _FINDING_TEXTS = ("title", "diagnosis")
