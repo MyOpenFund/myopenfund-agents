@@ -1,6 +1,6 @@
 """Deterministic night summary: the only view of a night an LLM ever sees.
 
-Every input-derived string placed into the text goes through `_clean`, which replaces `<` by `‹`
+Every input-derived string placed into the text goes through `clean`, which replaces `<` by `‹`
 so no value can close the `<summary>` delimiter (Review Focus 2).
 """
 
@@ -112,7 +112,7 @@ def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: in
     skipped = 0
     for (run_id, command), codes in cleared.items():
         head = (
-            f"Degraded run {_clean(run_id)} ({_cut(_clean(command), max_chars)}): "
+            f"Degraded run {clean(run_id)} ({_cut(clean(command), max_chars)}): "
             "no signal of their own, not flagged for it: "
         )
         names = _names(sorted(codes), max(share - len(head), 0))
@@ -127,7 +127,7 @@ def _cleared_lines(rows: list[SourceRunRow], implicated: set[int], max_chars: in
     return lines
 
 
-def _clean(value: Any) -> str:
+def clean(value: Any) -> str:
     """One-line, delimiter-safe rendering of an input-derived value."""
     text = value if isinstance(value, str) else str(value)
     return " ".join(text.replace("<", "‹").split())
@@ -141,7 +141,7 @@ def _cut(text: str, max_chars: int) -> str:
 
 def _names(codes: list[str], budget: int) -> str:
     """Whole names joined within ``budget`` characters; the rest is counted, never cut mid-name."""
-    names = [_clean(c) for c in codes]
+    names = [clean(c) for c in codes]
     full = ", ".join(names)
     if len(full) <= budget:
         return full
@@ -206,7 +206,7 @@ def _source_state(
     for row in tonight:
         for sample in row.error_samples:
             if len(samples) < settings.error_samples_per_source:
-                samples.append(_cut(_clean(sample), settings.error_sample_max_chars))
+                samples.append(_cut(clean(sample), settings.error_sample_max_chars))
     corpus = next((r.corpus for r in tonight if r.corpus), corpus_hint)
     state = SourceState(
         source_code=code,
@@ -252,7 +252,7 @@ def _source_state(
 
 def _block(state: SourceState, max_chars: int) -> str:
     lines = [
-        f"[{_clean(state.source_code)}] corpus={_clean(state.corpus or '-')} flags={','.join(state.flags)}",
+        f"[{clean(state.source_code)}] corpus={clean(state.corpus or '-')} flags={','.join(state.flags)}",
         f"{TONIGHT_PREFIX} seen={state.docs_seen} new={state.docs_new} failed={state.docs_failed} "
         f"fetch_errors={state.fetch_errors} bad_content={state.bad_content} "
         f"truncated={'yes' if state.truncated else 'no'}",
@@ -261,20 +261,20 @@ def _block(state: SourceState, max_chars: int) -> str:
         f"{DAYS_LATE_PREFIX}{_fmt(state.days_late)} open_discovery_errors={state.open_discovery_errors}",
     ]
     if state.failed_commands:
-        commands = dict.fromkeys(_cut(_clean(c), max_chars) for c in state.failed_commands)
+        commands = dict.fromkeys(_cut(clean(c), max_chars) for c in state.failed_commands)
         lines.append(f"{FAILED_COMMANDS_PREFIX} " + _names(list(commands), max_chars + 20))
     lines += [f"{SAMPLE_PREFIX} {s}" for s in state.error_samples]
     return "\n".join(lines) + "\n"
 
 
 def _failing_label(run: RunRow, has_detail: bool) -> str:
-    return _clean(run.run_id) if has_detail else _clean(run.run_id) + NO_DETAIL_SUFFIX
+    return clean(run.run_id) if has_detail else clean(run.run_id) + NO_DETAIL_SUFFIX
 
 
 def _run_line(run: RunRow, has_detail: bool, max_chars: int) -> str:
     return (
-        f"{_failing_label(run, has_detail)}: {_cut(_clean(run.tool), max_chars)} {_cut(_clean(run.command), max_chars)} "
-        f"outcome={_clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
+        f"{_failing_label(run, has_detail)}: {_cut(clean(run.tool), max_chars)} {_cut(clean(run.command), max_chars)} "
+        f"outcome={clean(run.outcome or '-')} exit={_fmt(run.exit_code)}"
     )
 
 

@@ -9,7 +9,7 @@ from myopenfund_agents.settings import A1Settings
 
 AGENT = "a1"
 _NOT_GROUPED = {Category.GENERAL_OUTAGE, Category.CADENCE_OVERDUE}
-_RANK = {Severity.INFO: 0, Severity.WARN: 1, Severity.ERROR: 2}
+SEVERITY_RANK = {Severity.INFO: 0, Severity.WARN: 1, Severity.ERROR: 2}
 
 
 class Kind(StrEnum):
@@ -116,7 +116,7 @@ def plan_actions(
 
 
 def _summary(news: list[Action], default_repo: str) -> Action:
-    severity = max((a.finding.severity for a in news), key=_RANK.__getitem__)
+    severity = max((a.finding.severity for a in news), key=SEVERITY_RANK.__getitem__)
     lines: list[str] = []
     size = 0
     for a in news:

@@ -62,6 +62,7 @@ Every threshold is a setting, overridden by `MOF_AGENTS_A1_<NAME>` (for example
 `MOF_AGENTS_A1_VOLUME_DROP_RATIO=0.3`). An out-of-range value stops the run with an error naming the
 variable: decimal settings must be finite and above 0 (`TEMPERATURE` may be 0), whole-number settings
 must be 0 or more (`VOLUME_WINDOW_NIGHTS`, `SUMMARY_CHAR_BUDGET` and `ERROR_SAMPLE_MAX_CHARS` at least 1).
+`EXPLAIN_GREEN_NIGHTS` takes `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`).
 There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instead.
 
 | Setting | Default | Meaning |
@@ -80,6 +81,11 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `MAX_NEW_ISSUES_PER_RUN` | 5 | above this, new issues collapse into one summary issue |
 | `MAX_SCHEMA_RETRIES` | 2 | retries when the model output fails the schema |
 | `TEMPERATURE` | 0.0 | model temperature |
+| `EXPLAIN_GREEN_NIGHTS` | false | `true` or `false`: also ask the model about a night with no finding (observations only) |
+| `QUOTE_MIN_CHARS` | 8 | a quote shorter than this (whitespace collapsed) counts as a false quote |
+| `QUOTES_MAX` | 3 | most quotes accepted in one explanation (at least 1) |
+| `OBSERVATIONS_MAX` | 3 | most observations accepted in one answer |
+| `OBSERVATION_MAX_CHARS` | 300 | longest accepted observation (at least 1) |
 | `ENGINE_TIMEOUT_S` | 600.0 | seconds allowed for one model request (`pydantic-ai`: each request, SDK retries included) or one `claude -p` call (`claude-code`) |
 
 A few literals remain in the code. They shape text, they do not judge a night, so they are fixed
