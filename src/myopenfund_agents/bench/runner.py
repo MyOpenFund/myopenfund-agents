@@ -75,6 +75,7 @@ def run_night(
                 findings=result.findings.model_dump(mode="json")["findings"],
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
+                model=result.model,
             )
         )
     return score_night(night, attempts)
@@ -166,6 +167,7 @@ def _markdown(payload: dict[str, Any], scores: list[NightScore], verdict_list: l
         f"# Bench: {payload['engine']} / {payload['model']} ({payload['profile']})",
         "",
         f"Run at {payload['stamp']}. Profile `{payload['profile']}`, repeat {payload['repeat']}.",
+        f"Model that answered: {', '.join(payload['models_used']) or '-'}.",
         "",
         "| Criterion | Value | Threshold | Pass |",
         "|---|---|---|---|",
@@ -216,6 +218,7 @@ def write_report(
     payload = {
         "engine": engine.name,
         "model": engine.model,
+        "models_used": sorted({a.model for s in scores for a in s.attempts if a.model}),
         "profile": profile,
         "stamp": now.isoformat(timespec="seconds"),
         "repeat": repeat,

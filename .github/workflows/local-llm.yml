@@ -1,0 +1,54 @@
+name: Local model
+
+# Started by hand only: slow, and a small model on a hosted CPU says little about quality. The real check is
+# `mof-agents bench-run` on a machine with the model (docs/engines.md).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-llm:
+    timeout-minutes: 75
+    runs-on: ubuntu-latest
+    env:
+      MOF_AGENTS_TEST_MODEL: qwen3:4b
+      # hosted CPU runners are slow; the engine timeout setting is the documented knob
+      MOF_AGENTS_A1_ENGINE_TIMEOUT_S: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Resolve the models directory
+        run: echo "OLLAMA_MODELS=$HOME/.ollama-models" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ollama-models
+          key: ollama-${{ env.MOF_AGENTS_TEST_MODEL }}
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          sudo systemctl stop ollama || true
+      - name: Start Ollama
+        run: |
+          mkdir -p "$OLLAMA_MODELS"
+          ollama serve > ollama.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:11434/api/tags > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "Ollama did not start within 60 s" >&2
+          cat ollama.log >&2
+          exit 1
+      - run: ollama pull "$MOF_AGENTS_TEST_MODEL"
+      - name: Local model test (a skip fails the job)
+        run: |
+          set -o pipefail
+          pytest -q -m local_llm -rs | tee local-llm.log
+          if grep -q "skipped" local-llm.log; then
+            echo "the local_llm test was skipped (is MOF_AGENTS_TEST_MODEL set?)" >&2
+            exit 1
+          fi

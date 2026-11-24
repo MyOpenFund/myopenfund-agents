@@ -41,6 +41,7 @@ class Attempt:
     findings: list[dict[str, Any]] | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model: str | None = None  # the model that answered, as the engine reports it
 
 
 @dataclass

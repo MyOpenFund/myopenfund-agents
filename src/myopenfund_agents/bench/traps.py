@@ -1,5 +1,6 @@
 """Traps: damage a green night in one known way and state exactly what A1 must then report."""
 
+import re
 import tomllib
 from datetime import timedelta
 from pathlib import Path
@@ -242,6 +243,14 @@ _KINDS = {
 }
 
 
+def _valid_arg(name: str, value: object) -> bool:
+    """A recipe may set only plain data: source code, repository and counts."""
+    if name in ("code", "repo"):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]+", value) is not None
+    minimum = {"seen": 0, "count": 1, "issue_number": 1}.get(name)
+    return minimum is not None and type(value) is int and value >= minimum
+
+
 def load_traps(root: Path, nights: list[Night]) -> list[Night]:
     """Trap nights built from ``root/traps.toml`` on one of ``nights``; none without that file."""
     path = root / RECIPES
@@ -251,9 +260,15 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
         spec = tomllib.loads(path.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"{RECIPES}: {exc}") from exc
-    base = next((n.inputs for n in nights if n.inputs.night_id == spec.get("base")), None)
-    if base is None:
+    unknown = sorted(set(spec) - {"base", "trap"})
+    if unknown:
+        raise ValueError(f"{RECIPES}: unknown key(s): {', '.join(unknown)}")
+    base_night = next((n for n in nights if n.inputs.night_id == spec.get("base")), None)
+    if base_night is None:
         raise ValueError(f"{RECIPES}: base night {spec.get('base')!r} not found")
+    if base_night.meta.origin != "green":
+        raise ValueError(f"{RECIPES}: base night {spec['base']!r} is not green")
+    base = base_night.inputs
     recipes = spec.get("trap", [])
     if not isinstance(recipes, list) or not all(isinstance(r, dict) for r in recipes):
         raise ValueError(f"{RECIPES}: 'trap' must be a list of tables")
@@ -264,9 +279,12 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
         build = _KINDS.get(kind) if isinstance(kind, str) else None
         if build is None:
             raise ValueError(f"{RECIPES}: unknown trap kind {kind!r}")
+        for name, value in args.items():
+            if not _valid_arg(name, value):
+                raise ValueError(f"{RECIPES}: {kind}: invalid {name} = {value!r}")
         try:
             result = build(base, **args)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError(f"{RECIPES}: {kind}: {exc}") from exc
         for night in result if isinstance(result, list) else [result]:
             if night.inputs.night_id in made:
