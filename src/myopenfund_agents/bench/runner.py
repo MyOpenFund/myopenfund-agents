@@ -29,7 +29,7 @@ from myopenfund_agents.core.detector import Detected, detect
 from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.core.triage import Triage, triage
 from myopenfund_agents.engines.base import Engine
-from myopenfund_agents.sanitise import DenyList, check_tree, redact_paths, violations
+from myopenfund_agents.sanitise import DenyList, check_tree, redact_paths, withheld
 from myopenfund_agents.settings import A1Settings
 
 DEFAULT_CORPUS_REPOS = {"central-bank": "central-bank-corpus", "company": "company-corpus"}
@@ -67,6 +67,9 @@ def _attempt(t: Triage, elapsed: float) -> Attempt:
     if checked is not None:
         out.explanations = [e.model_dump(mode="json") for e in checked.kept.values()]
         out.dropped = dict(checked.dropped)
+        out.dropped_explanations = [
+            {**e.model_dump(mode="json"), "reason": checked.dropped[fid]} for fid, e in checked.dropped_copies.items()
+        ]
         out.observations = list(checked.observations)
         out.quotes_total, out.quotes_exact = checked.quotes_total, checked.quotes_exact
         out.unknown_numbers = checked.unknown_numbers
@@ -92,25 +95,20 @@ def run_night(
     return score_night(night, attempts)
 
 
-def _withheld(text: str, deny: DenyList) -> str:
-    reasons = violations(text, deny)
-    return f"withheld ({', '.join(reasons)})" if reasons else text
-
-
 def _withhold_texts(nights: list[dict[str, Any]], deny: DenyList) -> None:
     """Replace each free text (finding title and evidence, diagnosis, quote, observation, error) carrying an infra
     detail by a withheld marker. The rest of the payload stays behind the fail-closed gate."""
     for attempt in (a for night in nights for a in night["attempts"]):
         for finding in attempt["findings"]:
-            finding["title"] = _withheld(finding["title"], deny)
-            finding["evidence"] = [_withheld(e, deny) for e in finding["evidence"]]
-        for explanation in attempt["explanations"]:
-            explanation["diagnosis"] = _withheld(explanation["diagnosis"], deny)
+            finding["title"] = withheld(finding["title"], deny)
+            finding["evidence"] = [withheld(e, deny) for e in finding["evidence"]]
+        for explanation in [*attempt["explanations"], *attempt["dropped_explanations"]]:
+            explanation["diagnosis"] = withheld(explanation["diagnosis"], deny)
             for quote in explanation["quotes"]:
-                quote["text"] = _withheld(quote["text"], deny)
-        attempt["observations"] = [_withheld(o, deny) for o in attempt["observations"]]
+                quote["text"] = withheld(quote["text"], deny)
+        attempt["observations"] = [withheld(o, deny) for o in attempt["observations"]]
         if attempt["error"] is not None:
-            attempt["error"] = _withheld(attempt["error"], deny)
+            attempt["error"] = withheld(attempt["error"], deny)
 
 
 def run_bench(
@@ -209,7 +207,7 @@ def mismatch_lines(scores: list[NightScore], deny: DenyList) -> list[str]:
                 f"findings expected {_plain_keys(s.expected)} got {_plain_keys(keys)}; "
                 f"actions expected {_plain_actions(s.expected_actions)} got {_plain_actions(actions)}"
             )
-            out.append(f"MISMATCH {_withheld(line, deny)}")
+            out.append(f"MISMATCH {withheld(line, deny)}")
     return out
 
 

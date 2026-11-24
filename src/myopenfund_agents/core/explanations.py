@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from myopenfund_agents.core.actions import SEVERITY_RANK
 from myopenfund_agents.core.detector import Detected
 from myopenfund_agents.core.findings import Category, Finding, Severity
-from myopenfund_agents.sanitise import DenyList, violations
+from myopenfund_agents.core.prompt import shown_evidence, shown_summary
+from myopenfund_agents.sanitise import DenyList, violations, withheld
 from myopenfund_agents.settings import A1Settings
 
 DIAGNOSIS_MAX = 2000
@@ -51,6 +52,8 @@ class Explanations(BaseModel):
 class Checked:
     kept: dict[str, Explanation] = field(default_factory=dict)
     dropped: dict[str, str] = field(default_factory=dict)
+    # What the model said in the dropped ones, each text with an infra detail withheld. For reports, never an Action.
+    dropped_copies: dict[str, Explanation] = field(default_factory=dict)
     observations: list[str] = field(default_factory=list)
     quotes_total: int = 0  # quotes given; an explanation returned without any counts as one inexact quote
     quotes_exact: int = 0
@@ -85,9 +88,12 @@ def _collapse(text: str) -> str:
     return _SPACE.sub(" ", text).strip()
 
 
-def _readings(text: str) -> dict[str, list[str]]:
-    """Each number token read merged ("1,234" is 1234) -> its split reading (1 and 234)."""
-    return {n.replace(",", ""): _PLAIN.findall(n) for n in _NUMBER.findall(text)}
+def _readings(text: str) -> dict[str, set[str]]:
+    """Each number token read merged ("1,234" is 1234) -> its split readings (1 and 234), over all its spellings."""
+    out: dict[str, set[str]] = {}
+    for n in _NUMBER.findall(text):
+        out.setdefault(n.replace(",", ""), set()).update(_PLAIN.findall(n))
+    return out
 
 
 def _known_numbers(text: str) -> set[str]:
@@ -99,21 +105,28 @@ def _known_numbers(text: str) -> set[str]:
 
 
 def _unknown_numbers(text: str, known: set[str]) -> int:
-    """Tokens that neither reading (merged or split) of the summary explains, each counted once."""
+    """Tokens that neither reading (merged or split) of the shown texts explains, each counted once."""
     return sum(
         1 for merged, parts in _readings(text).items() if merged not in known and not all(p in known for p in parts)
     )
 
 
+def _safe_copy(e: Explanation, deny: DenyList) -> Explanation:
+    quotes = [q.model_copy(update={"text": withheld(q.text, deny)}) for q in e.quotes]
+    return e.model_copy(update={"diagnosis": withheld(e.diagnosis, deny), "quotes": quotes})
+
+
 def check(e: Explanations, detected: list[Detected], summary_text: str, settings: A1Settings, deny: DenyList) -> Checked:
-    """Keep the explanations whose quotes are really in the summary and that the sanitiser lets through."""
+    """Keep the explanations whose quotes are really in the summary or in an evidence line, if the sanitiser agrees."""
     ids = {d.finding_id for d in detected}
-    seen_text = summary_text.replace("<", "‹")  # what the model was shown
-    haystack = _collapse(seen_text)
-    known = _known_numbers(seen_text)
+    # What the model was shown. One text per evidence line: a quote never spans two of them.
+    texts = [shown_summary(summary_text), *(line for d in detected for line in shown_evidence(d))]
+    haystacks = [_collapse(t) for t in texts]
+    known = set().union(*(_known_numbers(t) for t in texts))
     id_words = re.compile(r"\b(?:" + "|".join(map(re.escape, ids)) + r")\b") if ids else None
     kept: dict[str, Explanation] = {}
     dropped: dict[str, str] = {}
+    copies: dict[str, Explanation] = {}
     total = exact = unknown = 0
     for x in e.explanations:
         if x.finding_id not in ids or x.finding_id in kept or x.finding_id in dropped:
@@ -124,7 +137,7 @@ def check(e: Explanations, detected: list[Detected], summary_text: str, settings
         total += max(1, len(x.quotes))
         for q in x.quotes:
             text = _collapse(q.text)
-            if len(text) >= settings.quote_min_chars and text in haystack:
+            if len(text) >= settings.quote_min_chars and any(text in h for h in haystacks):
                 good += 1
         exact += good
         if not x.diagnosis.strip():
@@ -137,10 +150,12 @@ def check(e: Explanations, detected: list[Detected], summary_text: str, settings
             dropped[x.finding_id] = WITHHELD
         else:
             kept[x.finding_id] = x
+        if x.finding_id in dropped:
+            copies[x.finding_id] = _safe_copy(x, deny)
     observations = [o for o in e.observations if len(o) <= settings.observation_max_chars and not violations(o, deny)][
         : settings.observations_max
     ]
-    return Checked(kept, dropped, observations, total, exact, unknown)
+    return Checked(kept, dropped, copies, observations, total, exact, unknown)
 
 
 def apply(d: Detected, e: Explanation | None) -> Finding:

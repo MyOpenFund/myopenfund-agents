@@ -66,15 +66,23 @@ def _violations(f: Finding, deny: DenyList) -> set[str]:
 
 
 def _published(checked: Checked, detected: list[Detected], deny: DenyList) -> Checked:
-    """Drop the explanations whose applied finding carries an infra detail the detected one did not have."""
+    """Drop the explanations whose applied finding carries an infra detail: in its diagnosis, the model's own text,
+    any at all; in the other texts and the whole body, one the detected finding did not have."""
     kept = dict(checked.kept)
     dropped = dict(checked.dropped)
+    copies = dict(checked.dropped_copies)
     for d in detected:
         e = kept.get(d.finding_id)
-        if e is not None and _violations(apply(d, e), deny) - _violations(d.finding, deny):
+        if e is None:
+            continue
+        applied = apply(d, e)
+        found = set(violations(applied.diagnosis, deny)) | (_violations(applied, deny) - _violations(d.finding, deny))
+        if found:
             del kept[d.finding_id]
             dropped[d.finding_id] = WITHHELD
-    return replace(checked, kept=kept, dropped=dropped)
+            # `check` found each text clean alone: the diagnosis is what makes the body carry the detail
+            copies[d.finding_id] = e.model_copy(update={"diagnosis": f"{WITHHELD} ({', '.join(sorted(found))})"})
+    return replace(checked, kept=kept, dropped=dropped, dropped_copies=copies)
 
 
 def _reworded(base: list[Action], explained: list[Action]) -> list[Action]:
@@ -116,6 +124,6 @@ def triage(
         findings = [apply(d, checked.kept.get(d.finding_id)) for d in detected]
         actions = _reworded(base, _plan(findings, inputs, repo_of, default_repo, settings, summary))
     except Exception as exc:  # noqa: BLE001 - whatever the model side does, the alert goes out
-        text = error_text(exc, deny)[: settings.engine_error_max_chars]
+        text = error_text(exc, deny, settings.engine_error_max_chars)
         return Triage(detected, detected_findings, base, None, text, result, summary)
     return Triage(detected, findings, actions, checked, None, result, summary)

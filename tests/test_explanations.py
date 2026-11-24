@@ -84,11 +84,64 @@ def test_no_quote_counts_next_to_exact_quotes():
     assert (c.quotes_total, c.quotes_exact) == (2, 1)
 
 
-def test_quote_may_not_come_from_the_findings_list():
-    d = _detected(evidence=("evidence only in findings",))
-    assert "evidence only in findings" in explain_prompt("other text", [d])
-    e = Explanations(explanations=[_exp(quotes=("evidence only in findings",))], observations=[])
-    assert check(e, [d], "other text", S, DENY).dropped == {"f1": "false quote"}
+def _quoted(quote, detected, summary="other text", diagnosis="The site timed out."):
+    e = Explanations(explanations=[_exp(diagnosis, quotes=(quote,))], observations=[])
+    return check(e, detected, summary, S, DENY)
+
+
+def test_quote_may_come_from_an_evidence_line_as_shown():
+    d = _detected(evidence=("  evidence <b>  only in findings", "second line"))
+    assert "evidence ‹b> only in findings" in explain_prompt("other text", [d])
+    c = _quoted("evidence ‹b> only in findings", [d])
+    assert "f1" in c.kept and (c.quotes_total, c.quotes_exact) == (1, 1)
+    assert _quoted("evidence <b> only in findings", [d]).dropped == {"f1": "false quote"}
+    other = Detected("f2", d.finding.model_copy(update={"evidence": ["line of another"]}), ())
+    assert "f1" in _quoted("line of another", [d, other]).kept
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "source=abc category=source_site_down",
+        "f1: source=abc",
+        "evidence: first evidence line",  # the prompt's label is not evidence
+        "first evidence line second evidence line",  # two lines are not one
+        "other text first evidence line",  # nor the summary and a line
+    ],
+)
+def test_the_rest_of_the_findings_block_is_no_quote(quote):
+    d = _detected(evidence=("first evidence line", "second evidence line"))
+    assert _quoted(quote, [d]).dropped == {"f1": "false quote"}
+
+
+def test_a_quote_of_a_source_omitted_from_the_summary_is_exact():
+    from conftest import night, src_run
+    from myopenfund_agents.core.detector import detect
+    from myopenfund_agents.core.summary import build_summary
+
+    settings = A1Settings(summary_char_budget=1000)
+    rows = [src_run(f"s{i:03d}", docs_failed=1, docs_new=777 if i == 99 else 0) for i in range(100)]
+    summary = build_summary(night(rows), settings)
+    detected = detect(summary, settings)
+    last = next(d for d in detected if d.finding.source_code == "s099")
+    quote = last.finding.evidence[1]
+    assert "777" in quote and "777" not in summary.text
+    e = Explanations(
+        explanations=[_exp("777 new documents.", quotes=(quote, "[s099] corpus=central-bank"), fid=last.finding_id)],
+        observations=[],
+    )
+    c = check(e, detected, summary.text, settings, DENY)
+    assert set(c.kept) == {last.finding_id} and c.unknown_numbers == 0
+
+
+def test_unknown_numbers_know_the_evidence_but_not_the_row():
+    d = _detected(evidence=("lost 4321 files",))
+    assert _quoted("lost 4321 files", [d], diagnosis="4321 lost").unknown_numbers == 0
+    assert _quoted("lost 4321 files", [d], diagnosis="4322 lost").unknown_numbers == 1
+    row = Detected("f1", d.finding.model_copy(update={"source_code": "x 5555"}), ())
+    assert _quoted("lost 4321 files", [row], diagnosis="5555 lost").unknown_numbers == 1
+    d = _detected(evidence=("ends 12", "34 starts"))
+    assert _quoted("34 starts", [d], summary="text 56", diagnosis="1234 and 5612").unknown_numbers == 2
 
 
 def test_private_ip_withheld_with_observation_dropped():
@@ -371,3 +424,43 @@ def test_id_error_never_echoes_the_unknown_id():
     message = id_error(e, ids, S)
     assert message == "an explanation uses an id that is not one of: f1, f2"
     assert id_error(e, frozenset(), S) == "an explanation uses an id that is not one of: none"
+
+
+@pytest.mark.parametrize("text", ["100,120,130 and 100120130", "100120130 and 100,120,130"])
+def test_a_list_also_written_merged_is_read_both_ways(text):
+    for diagnosis in ("saw 120", "saw 100120130", "saw 100,120,130"):
+        assert _check(_exp(diagnosis), summary=f"counts {text} {QUOTE}").unknown_numbers == 0
+    assert _check(_exp(f"saw {text}"), summary=f"counts 100 120 130 {QUOTE}").unknown_numbers == 1
+
+
+def test_instructions_say_where_a_quote_may_come_from():
+    rule = explain_instructions(S).split("\n3. ")[1].split("\n4. ")[0]
+    assert "summary" in rule and "evidence line" in rule and "source=" in rule
+
+
+def test_dropped_explanations_keep_a_copy():
+    c = _check(_exp("Wrong.", quotes=(QUOTE, "never in the summary")))
+    assert c.dropped == {"f1": "false quote"}
+    copy = c.dropped_copies["f1"]
+    assert copy == _exp("Wrong.", quotes=(QUOTE, "never in the summary"))
+    assert _check(_exp()).dropped_copies == {}
+    assert _check(_exp(quotes=())).dropped_copies["f1"].diagnosis == "The site timed out."
+    assert _check(_exp(diagnosis=" ")).dropped_copies.keys() == {"f1"}
+
+
+def test_dropped_copy_withholds_each_text_with_an_infra_detail():
+    deny = DenyList(hosts=["secret.example"], path_roots=["/srv/data"])
+    quotes = ("token=abcdef123456", "never in the summary", "at /srv/data/x here")
+    e = Explanations(explanations=[_exp("It is secret.example, 10.0.0.5.", quotes=quotes)], observations=[])
+    c = check(e, [_detected()], SUMMARY, S, deny)
+    assert c.dropped == {"f1": "false quote"} and not c.kept
+    copy = c.dropped_copies["f1"]
+    assert copy.diagnosis == "withheld (deny_host, private_ip)"
+    assert [q.text for q in copy.quotes] == [
+        "withheld (credential, signed_url)",
+        "never in the summary",
+        "withheld (deny_path)",
+    ]
+    clean = Explanations(explanations=[_exp(quotes=quotes)], observations=[])
+    assert check(clean, [_detected()], SUMMARY, S, deny).dropped_copies["f1"].diagnosis == "The site timed out."
+    assert e.explanations[0].diagnosis.startswith("It is")  # the model's answer itself is untouched

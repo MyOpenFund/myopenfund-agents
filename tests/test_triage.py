@@ -12,7 +12,7 @@ from myopenfund_agents.core.summary import build_summary
 from myopenfund_agents.core.triage import triage
 from myopenfund_agents.engines.base import EngineError
 from myopenfund_agents.engines.fake import FakeEngine
-from myopenfund_agents.sanitise import DenyList, error_text
+from myopenfund_agents.sanitise import DenyList, error_text, violations
 from myopenfund_agents.settings import A1Settings
 
 S = A1Settings()
@@ -279,7 +279,7 @@ def test_error_text_is_capped_by_a_setting():
     t = _run(_inputs(), _engine(RuntimeError("x" * 900)))
     assert len(t.engine_error) == 500
     t = _run(_inputs(), _engine(RuntimeError("x" * 900)), A1Settings(engine_error_max_chars=20))
-    assert len(t.engine_error) == 20
+    assert t.engine_error == "x" * 20
     assert A1Settings.from_env({"MOF_AGENTS_A1_ENGINE_ERROR_MAX_CHARS": "7"}).engine_error_max_chars == 7
     with pytest.raises(ValueError):
         A1Settings.from_env({"MOF_AGENTS_A1_ENGINE_ERROR_MAX_CHARS": "0"})
@@ -367,3 +367,84 @@ def test_no_run_night_explained_keeps_the_no_run_fingerprint():
     t = _run(inp, _engine(Explanations(explanations=[_exp(d, text="Nothing ran.")], observations=[])))
     assert [a.fingerprint for a in t.actions] == ["a1:orch:*:no_run"] and not t.degraded
     assert "Nothing ran." in t.actions[0].finding.diagnosis
+
+
+@pytest.mark.parametrize("cap", [1, 5, 20, 500])
+def test_an_engine_error_that_the_cut_makes_unclean_is_withheld(cap):
+    deny = DenyList(path_roots=["/srv/data"])
+    text = "x" * (cap - len("/srv/data")) + "/srv/database is full"
+    if cap < len("/srv/data"):
+        text = "/srv/database is full"
+    assert not violations(text, deny)  # only the cut makes it a hit
+    t = _run(_inputs(), _engine(RuntimeError(text)), A1Settings(engine_error_max_chars=cap), deny=deny)
+    assert not violations(t.engine_error, deny) and len(t.engine_error) <= cap and t.degraded
+    if cap >= 20:
+        assert t.engine_error == "RuntimeError: withheld (deny_path)"[:cap]
+
+
+def test_the_reviewers_engine_error_example():
+    deny = DenyList(path_roots=["/srv/data"])
+    s = A1Settings(engine_error_max_chars=20)
+    t = _run(_inputs(), _engine(RuntimeError("failed on /srv/data-archive")), s, deny=deny)
+    assert t.engine_error == "failed on /srv/data-"
+    s = A1Settings(engine_error_max_chars=19)
+    t = _run(_inputs(), _engine(RuntimeError("failed on /srv/data-archive")), s, deny=deny)
+    assert t.engine_error == "RuntimeError: withhe"[:19]
+
+
+def test_the_withheld_marker_is_within_the_cap_and_clean():
+    s = A1Settings(engine_error_max_chars=15)
+    t = _run(_inputs(), _engine(RuntimeError("at 10.1.2.3 " + "y" * 900)), s)
+    assert t.engine_error == "RuntimeError: withheld (private_ip)"[:15]
+    # the type name itself is denied: the marker cannot be used
+    deny = DenyList(hosts=["runtimeerror", "10.1"])
+    t = _run(_inputs(), _engine(RuntimeError("at 10.1.2.3")), deny=deny)
+    assert t.engine_error == "withheld"
+    t = _run(_inputs(), _engine(RuntimeError("at 10.1.2.3")), deny=DenyList(hosts=["runtimeerror", "withheld"]))
+    assert t.engine_error == "" and t.degraded
+
+
+def test_an_infra_detail_cut_in_two_or_away_is_still_withheld():
+    s = A1Settings(engine_error_max_chars=40)
+    for text in ("y" * 33 + "10.1.2.3", "y" * 60 + " 10.1.2.3"):
+        t = _run(_inputs(), _engine(RuntimeError(text)), s)
+        assert t.engine_error == "RuntimeError: withheld (private_ip)"
+
+
+def test_the_type_name_used_for_an_unreadable_error_is_cut_and_scanned():
+    class NasExample(Exception):
+        def __str__(self):
+            raise RuntimeError("no str")
+
+    assert error_text(NasExample(), DenyList(), 3) == "Nas"
+    assert error_text(NasExample(), DenyList(hosts=["nasexample"])) == "withheld"
+
+
+def test_a_secret_in_the_applied_diagnosis_is_withheld_even_when_the_evidence_has_one():
+    inp = night([src_run("aa", fetch_errors=3, error_samples=["password=hunter2222"])])
+    d = _detected(inp)[0]
+    assert any("hunter2222" in line for line in d.finding.evidence)
+    ex = Explanations(explanations=[_exp(d, text="The log shows a token:", quote="fetch_errors")], observations=[])
+    t = _run(inp, _engine(ex))
+    assert t.checked.dropped == {d.finding_id: "withheld"} and t.findings == [d.finding]
+
+
+def test_the_copy_of_a_dropped_explanation_never_reaches_an_action():
+    inp = _inputs()
+    first, second = _detected(inp)
+    ex = [_exp(first, text="Zebra text.", quote="never in the summary"), _exp(second, text="A giraffe token:")]
+    t = _run(inp, _engine(Explanations(explanations=ex, observations=[])))
+    assert t.checked.dropped == {first.finding_id: "false quote", second.finding_id: "withheld"}
+    copies = t.checked.dropped_copies
+    assert copies[first.finding_id].diagnosis == "Zebra text."
+    # the hit only exists once the cause line is appended: the diagnosis is withheld all the same
+    assert copies[second.finding_id].diagnosis == "withheld (credential)"
+    assert copies[second.finding_id].quotes == ex[1].quotes
+    assert t.actions == _run(inp, None).actions and t.findings == [first.finding, second.finding]
+
+
+def test_a_hit_only_in_the_joined_body_is_withheld():
+    inp = _inputs(("aa",))
+    deny = DenyList(hosts=["source_site_down\nthe site"])  # spans the title and the diagnosis
+    t = _run(inp, _engine(_all(inp)), deny=deny)
+    assert t.checked.dropped == {"f1": "withheld"} and t.actions == _run(inp, None).actions

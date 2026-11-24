@@ -44,7 +44,8 @@ class Attempt:
 
     `findings` and `actions` are the detector's (no model). `valid` says whether the engine's answer was usable,
     None when the engine was not called. `explanations` are the ones kept, `dropped` the reasons of the others
-    (finding id -> reason). Tokens are None when the engine does not report them.
+    (finding id -> reason), `dropped_explanations` their sanitised copies, each with its `reason`.
+    Tokens are None when the engine does not report them.
     """
 
     findings: list[dict[str, Any]]
@@ -53,6 +54,7 @@ class Attempt:
     valid: bool | None = None
     explanations: list[dict[str, Any]] = field(default_factory=list)
     dropped: dict[str, str] = field(default_factory=dict)
+    dropped_explanations: list[dict[str, Any]] = field(default_factory=list)
     observations: list[str] = field(default_factory=list)
     quotes_total: int = 0
     quotes_exact: int = 0

@@ -2,7 +2,7 @@
 
 The code decides which findings a night has; the engine only explains them. It gets a short text summary of the
 night and the detected findings, and returns schema-validated explanations, each with quotes the code checks
-against the summary. Without an engine, or when it fails, the same alerts go out with "No explanation.". The
+against the summary and the findings' evidence. Without an engine, or when it fails, the same alerts go out with "No explanation.". The
 engine is chosen **by environment only**; nothing in the code or the bench picks a model.
 
 | Variable | Meaning |
@@ -79,8 +79,8 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `FAILING_RUNS_CHAR_BUDGET` | 3000 | characters for the failing-run lines, never over a quarter of the summary budget; the rest is counted |
 | `ERROR_SAMPLE_MAX_CHARS` | 300 | maximum length of one error sample |
 | `ERROR_SAMPLES_PER_SOURCE` | 3 | error samples kept per source |
-| `GENERAL_OUTAGE_MIN_SOURCES` | 5 | more failing sources than this are grouped as one general outage |
-| `MAX_NEW_ISSUES_PER_RUN` | 5 | above this, new issues collapse into one summary issue |
+| `GENERAL_OUTAGE_MIN_SOURCES` | 5 | more sources than this with the same category (never `cadence_overdue` or `unknown`), or matched by the detector's failed-run row, are grouped as one general outage |
+| `MAX_NEW_ISSUES_PER_RUN` | 5 | above this, new issues collapse into one summary issue that carries **titles only** (with their fingerprints): no diagnosis, explanation or evidence line |
 | `MAX_SCHEMA_RETRIES` | 2 | retries when the model output fails the schema or names an unknown finding id; the retry tells the model only fixed wording (never its own text or the CLI's output) |
 | `TEMPERATURE` | 0.0 | model temperature |
 | `EXPLAIN_GREEN_NIGHTS` | false | `true` or `false`: also ask the model about a night with no finding (observations only) |
@@ -89,7 +89,7 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `OBSERVATIONS_MAX` | 3 | most observations accepted in one answer |
 | `OBSERVATION_MAX_CHARS` | 300 | longest accepted observation (at least 1) |
 | `FEEDBACK_ERRORS_MAX` | 5 | schema errors named to `claude-code` when it is asked to answer again (at least 1) |
-| `ENGINE_ERROR_MAX_CHARS` | 500 | longest engine error text kept on a triage, after sanitising (at least 1) |
+| `ENGINE_ERROR_MAX_CHARS` | 500 | longest engine error text kept on a triage, withheld marker included; the text is scanned before and after the cut (at least 1) |
 | `ENGINE_TIMEOUT_S` | 600.0 | seconds allowed for one model request (`pydantic-ai`: each request, SDK retries included) or one `claude -p` call (`claude-code`) |
 
 A few literals remain in the code. They shape text, they do not judge a night, so they are fixed
@@ -190,7 +190,7 @@ there is nothing to explain, no model is called and the run stops with exit code
 | `detector exact` | nights whose findings and actions equal the expected answer in every attempt (no model) | 100% |
 | `findings explained` | findings with a kept explanation / detected findings | `min_explained` |
 | `valid output` | attempts whose engine answer was usable / attempts | `min_valid` |
-| `quotes exact (of quotes given)` | quotes found verbatim in the summary / quotes given | `min_quotes_exact` |
+| `quotes exact (of quotes given)` | quotes found verbatim in the summary or in one evidence line of a finding / quotes given | `min_quotes_exact` |
 | `fallback nights` | nights where some attempt sent a finding out unexplained | `max_fallback_nights` (optional) |
 | `slowest night (s)` | slowest attempt | `max_seconds_per_night` (optional) |
 
@@ -202,7 +202,7 @@ report has a "Detector mismatches" section: expected and detected findings and a
 
 The model criteria run over **every** attempt of every night with at least one detected finding: a failed engine is
 0 explained, never skipped. A night without finding is listed with its detector result and is in no model figure.
-Reported without a threshold: fallback nights, numbers in a diagnosis that the summary does not show,
+Reported without a threshold: fallback nights, numbers in a diagnosis that neither the summary nor the evidence lines show,
 `likely_cause` agreement per finding over the repeats (mean and worst; an attempt that gave no explanation for the
 finding agrees with no other attempt, so a finding never explained is at 0%; `-` with a single attempt), mean and
 worst seconds, and the tokens the engine reports (`partial (n of m attempts)` when some are unknown, `-` when all are).
@@ -211,11 +211,11 @@ A threshold file with an unknown or missing key is refused.
 The JSON report records how it was produced (`repeat`, every A1 setting, the threshold profile values) and, for each
 night and attempt: the detector's findings (title, evidence, other flags) and actions, the engine error, each kept
 explanation (diagnosis, likely cause, severity, quotes: kept so diagnoses can be graded later), why the other
-explanations were dropped (`false quote`, `no quote`, `empty`, `withheld`), the observations, quote and number counts,
-seconds, schema retries and tokens. The model's raw answer is never written: a dropped explanation leaves only its
-reason. A finding title, an evidence line, a diagnosis, a quote, an observation or an engine error that carries an
-infrastructure detail is kept as `withheld (<reasons>)` (an explanation or observation already caught during the
-triage is dropped); any other infrastructure detail refuses the report (nothing written).
+explanations were dropped (`false quote`, `no quote`, `empty`, `withheld`), a sanitised copy of each dropped one with
+its reason (`dropped_explanations`), the observations, quote and number counts, seconds, schema retries and tokens.
+The model's raw answer is never written, and a dropped explanation never reaches an issue. A finding title, an evidence line, a diagnosis, a quote, an observation or an engine error that carries an
+infrastructure detail is kept as `withheld (<reasons>)` (an explanation already caught during the triage
+is dropped, its copy keeping the marker; such an observation is dropped entirely); any other infrastructure detail refuses the report (nothing written).
 
 ### Profiles
 

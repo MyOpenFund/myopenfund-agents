@@ -3,9 +3,9 @@ import random
 import pytest
 
 from conftest import night, src_run
-from myopenfund_agents.core.actions import fingerprint
+from myopenfund_agents.core.actions import fingerprint, plan_actions
 from myopenfund_agents.core.detector import RULES, Detected, detect
-from myopenfund_agents.core.findings import Category, Severity
+from myopenfund_agents.core.findings import Category, Findings, Severity
 from myopenfund_agents.core.inputs import DiscoveryError, RunRow
 from myopenfund_agents.core.summary import NO_RUN_LINE, build_summary
 from myopenfund_agents.settings import A1Settings
@@ -98,13 +98,13 @@ def _cadence():
 
 FAILED = dict(outcome="failed", exit_code=1)
 PAIRS = {
-    "bad_content+fetch_errors": (dict(bad_content=1, fetch_errors=1), "unreadable_pdf", "warn", ("fetch_errors",)),
+    "bad_content+fetch_errors": (dict(bad_content=1, fetch_errors=1), "unreadable_pdf", "error", ("fetch_errors",)),
     "fetch_errors+volume_drop": (dict(fetch_errors=1, seen=1), "source_site_down", "error", ("volume_drop",)),
     "truncated+failed_run": (dict(truncated=True, **FAILED), "source_site_down", "error", ("failed_run",)),
     "fetch_errors+failed_run": (dict(fetch_errors=2, **FAILED), "source_site_down", "error", ("failed_run",)),
     "volume_drop+docs_failed": (dict(seen=1, docs_failed=1), "volume_drop", "warn", ("docs_failed",)),
-    "docs_failed+failed_run": (dict(docs_failed=1, **FAILED), "unknown", "warn", ("failed_run",)),
-    "volume_drop+failed_run": (dict(seen=1, **FAILED), "volume_drop", "warn", ("failed_run",)),
+    "docs_failed+failed_run": (dict(docs_failed=1, **FAILED), "unknown", "error", ("failed_run",)),
+    "volume_drop+failed_run": (dict(seen=1, **FAILED), "volume_drop", "error", ("failed_run",)),
 }
 
 
@@ -177,18 +177,14 @@ def test_outage_does_not_cover_unexplained_runs_for_other_categories():
     history = [src_run(f"s{i}", night=n) for i in range(6) for n in range(1, 8)]
     found = _detect(night(rows, history, runs=[_bad_run()]))
     assert sorted(_keys(found)) == [("*", "general_outage"), ("*", "unknown")]
-    rows = [src_run(f"s{i}") for i in range(6)]
-    found = _detect(night(rows, [], runs=[_bad_run()], discovery_errors=[_discovery(f"s{i}") for i in range(6)]))
-    assert sorted(_keys(found)) == [("*", "general_outage"), ("*", "unknown")]
 
 
 def test_outage_counts_only_the_sources_it_absorbed():
-    rows = [src_run(f"d{i}") for i in range(6)]  # discovery only: grouped as unknown
+    rows = [src_run(f"v{i}", seen=1) for i in range(6)]  # volume drop only: grouped
     rows += [src_run(f"s{i}", fetch_errors=1) for i in range(3)]  # site down, too few to group
-    rows += [src_run(f"v{i}", seen=1, **FAILED) for i in range(3)]  # volume_drop + failed_run, too few to group
-    history = [src_run(f"v{i}", night=n) for i in range(3) for n in range(1, 8)]
-    errors = [_discovery(f"d{i}") for i in range(6)]
-    found = _detect(night(rows, history, runs=[_bad_run()], discovery_errors=errors))
+    rows += [src_run(f"c{i}", **FAILED) for i in range(3)]  # failed_run, too few to group
+    history = [src_run(f"v{i}", night=n) for i in range(6) for n in range(1, 8)]
+    found = _detect(night(rows, history, runs=[_bad_run()]))
     assert ("*", "general_outage") in _keys(found)
     assert ("*", "unknown") in _keys(found)
 
@@ -325,3 +321,81 @@ def test_detection_is_deterministic():
         rng.shuffle(shuffled)
         rng.shuffle(shuffled_runs)
         assert _detect(night(shuffled, history, runs=shuffled_runs)) == expected
+
+
+@pytest.mark.parametrize("crashed, covered", [(5, False), (6, True)])
+def test_covering_boundary(crashed, covered):
+    rows = [src_run(f"v{i}", seen=1, **(FAILED if i < crashed else {})) for i in range(6)]
+    history = [src_run(f"v{i}", night=n) for i in range(6) for n in range(1, 8)]
+    found = _detect(night(rows, history, runs=[_bad_run()]))
+    assert _keys(found) == [("*", "general_outage")] + ([] if covered else [("*", "unknown")])
+
+
+def test_small_unrelated_unknowns_are_never_an_outage():
+    rows = [src_run(f"s{i}", docs_failed=1) for i in range(6)]
+    found = _detect(night(rows))
+    assert _keys(found) == [(f"s{i}", "unknown") for i in range(6)]
+    assert all(d.finding.evidence[0].startswith(f"[{d.finding.source_code}]") for d in found)
+    rows = [src_run(f"d{i}", docs_failed=1) for i in range(2)] + [src_run(f"c{i}", **FAILED) for i in range(2)]
+    rows += [src_run(f"o{i}") for i in range(2)]
+    found = _detect(night(rows, discovery_errors=[_discovery("o0"), _discovery("o1")]))
+    assert sorted(_keys(found)) == [(c, "unknown") for c in ("c0", "c1", "d0", "d1", "o0", "o1")]
+
+
+def test_docs_failed_with_failed_run_is_not_matched_by_the_failed_run_rule():
+    rows = [src_run(f"c{i}", **FAILED) for i in range(5)] + [src_run("d0", docs_failed=1, **FAILED)]
+    assert len(_detect(night(rows))) == 6
+
+
+@pytest.mark.parametrize("n", [5, 6])
+def test_failed_run_sources_are_grouped_above_the_threshold(n):
+    rows = [src_run(f"c{i}", **FAILED) for i in range(n)]
+    found = _detect(night(rows, runs=[_bad_run()]))
+    if n == 5:
+        assert sorted(_keys(found)) == [("*", "unknown")] + [(f"c{i}", "unknown") for i in range(5)]
+        return
+    assert _keys(found) == [("*", "general_outage")]  # six absorbed failed_run sources cover the unexplained run
+    f = found[0].finding
+    assert f.severity == Severity.ERROR and f.evidence == ["sources: c0, c1, c2, c3, c4, c5"]
+    assert found[0].finding_id == "f1" and "6 sources" in f.title
+
+
+def test_failed_run_threshold_is_the_setting():
+    rows = [src_run(f"c{i}", **FAILED) for i in range(3)]
+    assert len(_detect(night(rows), A1Settings(general_outage_min_sources=3))) == 3
+    assert _keys(_detect(night(rows), A1Settings(general_outage_min_sources=2))) == [("*", "general_outage")]
+
+
+def test_failed_run_with_lower_rows_is_still_grouped():
+    rows = [src_run(f"c{i}", **FAILED) for i in range(6)]
+    found = _detect(night(rows, discovery_errors=[_discovery("c5")]))
+    assert _keys(found) == [("*", "general_outage")]
+    assert found[0].finding.evidence == ["sources: c0, c1, c2, c3, c4, c5"]  # c5 has more flags, so it comes first
+
+
+def test_both_outages_make_one_finding_that_plan_actions_keeps():
+    rows = [src_run(f"a{i}", fetch_errors=1) for i in range(6)] + [src_run(f"c{i}", **FAILED) for i in range(6)]
+    rows.append(src_run("pdf", bad_content=1))
+    found = _detect(night(rows))
+    assert sorted(_keys(found)) == [("*", "general_outage"), ("pdf", "unreadable_pdf")]
+    outage = next(d.finding for d in found if d.finding.source_code == "*")
+    codes = [f"a{i}" for i in range(6)] + [f"c{i}" for i in range(6)]
+    assert outage.evidence == [f"sources: {', '.join(codes)}"] and "12 sources" in outage.title
+    acts = plan_actions(Findings(findings=[d.finding for d in found]), [], {}, "d", SETTINGS)
+    assert [a.finding for a in acts] == [d.finding for d in found]
+
+
+def test_an_outage_leaves_the_other_kind_below_the_threshold_alone():
+    rows = [src_run(f"a{i}", fetch_errors=1) for i in range(6)] + [src_run(f"c{i}", **FAILED) for i in range(2)]
+    found = _detect(night(rows))
+    assert sorted(_keys(found)) == [("*", "general_outage"), ("c0", "unknown"), ("c1", "unknown")]
+    rows = [src_run(f"a{i}", fetch_errors=1) for i in range(2)] + [src_run(f"c{i}", **FAILED) for i in range(6)]
+    found = _detect(night(rows))
+    assert sorted(_keys(found)) == [("*", "general_outage"), ("a0", "source_site_down"), ("a1", "source_site_down")]
+
+
+def test_severity_is_the_highest_of_every_matching_row():
+    found = _detect(night([src_run("se", docs_failed=1)], _history(), cadence=_cadence()))
+    assert [(d.finding.category.value, d.finding.severity.value) for d in found] == [("unknown", "warn")]
+    found = _detect(night([src_run("se", seen=1, **FAILED)], _history()))
+    assert [(d.finding.category.value, d.finding.severity.value) for d in found] == [("volume_drop", "error")]

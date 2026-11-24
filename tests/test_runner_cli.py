@@ -434,7 +434,7 @@ def test_report_json_carries_the_detector_findings_and_the_answer(tmp_path, gree
     (d,) = detect(build_summary(n.inputs, A1Settings()), A1Settings())
     assert attempt["findings"] == [
         {
-            "finding_id": "f1", "source_code": "se", "category": "unreadable_pdf", "severity": "warn",
+            "finding_id": "f1", "source_code": "se", "category": "unreadable_pdf", "severity": "error",
             "title": d.finding.title, "evidence": d.finding.evidence, "other_flags": list(d.other_flags),
         }
     ]  # fmt: skip
@@ -932,3 +932,41 @@ def test_report_and_cli_never_show_a_failing_value_as_its_threshold(tmp_path, mo
     monkeypatch.setattr(cli, "run_bench", lambda *a: (scores, [failing]))
     assert cli.main(_run_args(tmp_path)) == 1
     assert "FAIL findings explained: 89.8% (44/49) (threshold 90.0%)" in capsys.readouterr().out
+
+
+def test_report_shows_the_dropped_explanations_with_their_reason(tmp_path, green_history):
+    n = _known_problem_night(green_history)
+    t = load_thresholds(THRESHOLDS, "local")
+    answer = _answer(_exp(diagnosis="Seen on 10.1.2.3 and nas.lan.example.", quote="password=abcdef123456"))
+    answer.explanations[0].quotes.append(Quote(source="summary", text="made up text mirror.example.org"))
+    engine = _ScriptedEngine(answer)
+    scores, verdicts = run_bench([n], engine, A1Settings(), 1, t, None, DenyList(hosts=["nas.lan.example"]))
+    # the report's own deny-list is applied too
+    deny = DenyList(hosts=["nas.lan.example", "mirror.example.org"])
+    md = write_report(tmp_path, engine, "local", scores, verdicts, deny=deny, **_rec("local"))
+    text = md.with_suffix(".json").read_text(encoding="utf-8")
+    assert not [x for x in ("10.1.2.3", "nas.lan", "abcdef123456", "mirror.example") if x in text]
+    attempt = json.loads(text)["nights"][0]["attempts"][0]
+    assert attempt["dropped"] == {"f1": "false quote"} and attempt["explanations"] == []
+    assert attempt["dropped_explanations"] == [
+        {
+            "finding_id": "f1", "diagnosis": "withheld (deny_host, private_ip)", "likely_cause": "unreadable_pdf",
+            "severity": "warn", "reason": "false quote",
+            "quotes": [
+                {"source": "summary", "text": "withheld (credential)"},
+                {"source": "summary", "text": "withheld (deny_host)"},
+            ],
+        }
+    ]  # fmt: skip
+
+
+def test_report_withholds_a_dropped_diagnosis_with_its_own_deny_list(tmp_path, green_history):
+    n = _known_problem_night(green_history)
+    engine = _ScriptedEngine(_answer(_exp(diagnosis="mirror.example.org", quote="a made up quote")))
+    scores, verdicts = run_bench([n], engine, A1Settings(), 1, load_thresholds(THRESHOLDS, "local"))
+    deny = DenyList(hosts=["mirror.example.org"])
+    md = write_report(tmp_path, engine, "local", scores, verdicts, deny=deny, **_rec("local"))
+    attempt = json.loads(md.with_suffix(".json").read_text(encoding="utf-8"))["nights"][0]["attempts"][0]
+    (got,) = attempt["dropped_explanations"]
+    assert got["diagnosis"] == "withheld (deny_host)" and got["quotes"][0]["text"] == "a made up quote"
+    assert scores[0].explained == 0
