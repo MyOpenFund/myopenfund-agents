@@ -19,6 +19,7 @@ _INT_MIN = {
     "quotes_max": 1,
     "observation_max_chars": 1,
     "engine_error_max_chars": 1,
+    "feedback_errors_max": 1,
 }
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
@@ -46,6 +47,7 @@ class A1Settings:
     quotes_max: int = 3  # quotes accepted per explanation
     observations_max: int = 3  # observations accepted per answer
     observation_max_chars: int = 300  # longest accepted observation
+    feedback_errors_max: int = 5  # validation errors named to the model when it is asked to answer again
     engine_error_max_chars: int = 500  # longest engine error text kept on a triage (after sanitising)
 
     @classmethod

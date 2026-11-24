@@ -64,7 +64,8 @@ def id_error(e: Explanations, ids: frozenset[str], settings: A1Settings) -> str 
     seen: set[str] = set()
     for x in e.explanations:
         if x.finding_id not in ids:
-            return f"unknown finding_id {x.finding_id!r}; use only: {', '.join(sorted(ids)) or 'none'}"
+            # Never echo the id: it is the model's own text, and this message goes back to the model.
+            return f"an explanation uses an id that is not one of: {', '.join(sorted(ids)) or 'none'}"
         if x.finding_id in seen:
             return f"finding_id {x.finding_id!r} explained more than once"
         seen.add(x.finding_id)

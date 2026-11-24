@@ -79,13 +79,15 @@ There is no "no timeout" value for `ENGINE_TIMEOUT_S`: set a large number instea
 | `ERROR_SAMPLES_PER_SOURCE` | 3 | error samples kept per source |
 | `GENERAL_OUTAGE_MIN_SOURCES` | 5 | more failing sources than this are grouped as one general outage |
 | `MAX_NEW_ISSUES_PER_RUN` | 5 | above this, new issues collapse into one summary issue |
-| `MAX_SCHEMA_RETRIES` | 2 | retries when the model output fails the schema |
+| `MAX_SCHEMA_RETRIES` | 2 | retries when the model output fails the schema or names an unknown finding id; the retry tells the model only fixed wording (never its own text or the CLI's output) |
 | `TEMPERATURE` | 0.0 | model temperature |
 | `EXPLAIN_GREEN_NIGHTS` | false | `true` or `false`: also ask the model about a night with no finding (observations only) |
 | `QUOTE_MIN_CHARS` | 8 | a quote shorter than this (whitespace collapsed) counts as a false quote |
 | `QUOTES_MAX` | 3 | most quotes accepted in one explanation (at least 1) |
 | `OBSERVATIONS_MAX` | 3 | most observations accepted in one answer |
 | `OBSERVATION_MAX_CHARS` | 300 | longest accepted observation (at least 1) |
+| `FEEDBACK_ERRORS_MAX` | 5 | schema errors named to `claude-code` when it is asked to answer again (at least 1) |
+| `ENGINE_ERROR_MAX_CHARS` | 500 | longest engine error text kept on a triage, after sanitising (at least 1) |
 | `ENGINE_TIMEOUT_S` | 600.0 | seconds allowed for one model request (`pydantic-ai`: each request, SDK retries included) or one `claude -p` call (`claude-code`) |
 
 A few literals remain in the code. They shape text, they do not judge a night, so they are fixed

@@ -16,9 +16,9 @@ class EngineResult:
     findings: Findings
     engine: str
     model: str
-    seconds: float
+    seconds: float  # all attempts, retries included
     retries: int = 0
-    input_tokens: int | None = None
+    input_tokens: int | None = None  # all attempts (claude-code adds them up; pydantic-ai reports the run's usage)
     output_tokens: int | None = None
     explanations: Explanations | None = None  # set by `explain`; `findings` is then an empty placeholder
 
