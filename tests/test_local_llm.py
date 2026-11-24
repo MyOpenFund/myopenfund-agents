@@ -1,6 +1,7 @@
 """Smoke test against a real local model: only schema-valid output is asserted, never its content.
 
-Runs only with `-m local_llm` and `MOF_AGENTS_TEST_MODEL` set (CI sets it; no paid API is involved).
+Runs only with `-m local_llm` and `MOF_AGENTS_TEST_MODEL` set (the manual `Local model` workflow
+sets it; no paid API is involved).
 """
 
 import os

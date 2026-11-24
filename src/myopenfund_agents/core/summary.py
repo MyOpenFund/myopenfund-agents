@@ -71,7 +71,8 @@ def _has_own_signal(row: SourceRunRow) -> bool:
 
 def _raises_flag(row: SourceRunRow) -> bool:
     """The row alone flags its source; an error sample by itself does not."""
-    return bool(row.truncated or row.fetch_errors or row.docs_failed or _count(row.bad_content))
+    counters = (row.fetch_errors or 0, row.docs_failed or 0, _count(row.bad_content))
+    return bool(row.truncated) or any(n > 0 for n in counters)
 
 
 def _is_degraded(row: SourceRunRow) -> bool:

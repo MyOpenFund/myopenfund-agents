@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from myopenfund_agents.bench.fixtures import Expected, ExpectedAction, Key, Meta, Night, load_all
+from myopenfund_agents.bench.runner import DEFAULT_CORPUS_REPOS, repo_of
 from myopenfund_agents.core.actions import fingerprint
 from myopenfund_agents.core.findings import Category, Finding, Severity
 from myopenfund_agents.core.inputs import NightInputs, OpenIssue, SourceRunRow
@@ -124,6 +125,8 @@ def new_source(base: NightInputs, code: str = "zz") -> Night:
         raise ValueError(f"night {base.night_id} has no source run to copy")
     if any(r.source_code == code for r in inputs.source_runs):
         raise ValueError(f"source {code!r} already has a run in night {base.night_id}")
+    if any(r.source_code == code for r in base.history):
+        raise ValueError(f"source {code!r} already runs in the history of night {base.night_id}")
     row = inputs.source_runs[0]
     update = {
         "command": f"harvest {code}",
@@ -269,9 +272,15 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
     if base_night.meta.origin != "green":
         raise ValueError(f"{RECIPES}: base night {spec['base']!r} is not green")
     base = base_night.inputs
+    unusual = sorted(build_summary(base, A1Settings()).unusual)
+    if unusual:
+        raise ValueError(f"{RECIPES}: base night {spec['base']!r} has unusual sources: {', '.join(unusual)}")
+    repos = repo_of(base_night, DEFAULT_CORPUS_REPOS)
     recipes = spec.get("trap", [])
     if not isinstance(recipes, list) or not all(isinstance(r, dict) for r in recipes):
         raise ValueError(f"{RECIPES}: 'trap' must be a list of tables")
+    if not recipes:
+        raise ValueError(f"{RECIPES}: no trap")
     made: dict[str, Night] = {}
     for recipe in recipes:
         args = dict(recipe)
@@ -282,6 +291,9 @@ def load_traps(root: Path, nights: list[Night]) -> list[Night]:
         for name, value in args.items():
             if not _valid_arg(name, value):
                 raise ValueError(f"{RECIPES}: {kind}: invalid {name} = {value!r}")
+        planned = repos.get(args.get("code"))
+        if "repo" in args and planned is not None and args["repo"] != planned:
+            raise ValueError(f"{RECIPES}: {kind}: repo {args['repo']!r}, but the planner uses {planned!r}")
         try:
             result = build(base, **args)
         except (TypeError, ValueError) as exc:
